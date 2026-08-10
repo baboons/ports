@@ -1,0 +1,36 @@
+{
+  "name": "@johan/ports",
+  "version": "0.1.0",
+  "description": "Scan localhost for running HTTP/HTTPS servers and index them",
+  "type": "module",
+  "bin": {
+    "ports": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp -R src/ui dist/ui && chmod +x dist/cli.js",
+    "serve": "node --experimental-strip-types src/cli.ts",
+    "prepublishOnly": "npm run build",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "dev": "tsc -p tsconfig.json --watch",
+    "ls": "node --experimental-strip-types src/cli.ts ls",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "ports",
+    "localhost",
+    "scanner",
+    "dev-servers"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "linkedom": "^0.18.13",
+    "typescript": "^7.0.2"
+  }
+}
