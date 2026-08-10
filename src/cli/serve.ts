@@ -9,6 +9,20 @@ import {
 import { enumerateListeners } from '../scan/listeners.ts';
 import { c } from './format.ts';
 
+/**
+ * How the user should re-run us with elevated privileges.
+ *
+ * argv[1] is the resolved bin path, which is what they actually invoked
+ * whether that was a global install, npx, or a source checkout - so the hint
+ * stays correct without hardcoding a package name that can change.
+ */
+function relaunchHint(port: number): string {
+  const invoked = process.argv[1] ?? '';
+  const viaGlobalBin = /[/\\]ports$/.test(invoked);
+  const command = viaGlobalBin ? 'ports' : `node ${invoked}`;
+  return `sudo ${command} --port ${port}`;
+}
+
 /** Ask a port whether it is another instance of us. */
 function identify(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -76,7 +90,7 @@ export async function serve(args: ServeArgs): Promise<void> {
   if (isPrivilegedPort(config.port) && !canBindPrivileged()) {
     process.stderr.write(
       `\n${c.red('Cannot bind port ' + config.port)} — ports below 1024 need root.\n` +
-        `  Try:  ${c.bold(`sudo npx @johan/ports --port ${config.port}`)}\n` +
+        `  Try:  ${c.bold(relaunchHint(config.port))}\n` +
         `  Or pick an unprivileged port, e.g. ${c.bold('--port 7373')}.\n\n`,
     );
     process.exit(1);
@@ -117,7 +131,7 @@ export async function serve(args: ServeArgs): Promise<void> {
     } else if (code === 'EACCES') {
       process.stderr.write(
         `\n${c.red('Permission denied binding port ' + config.port)}.\n` +
-          `  Try:  ${c.bold(`sudo npx @johan/ports --port ${config.port}`)}\n\n`,
+          `  Try:  ${c.bold(relaunchHint(config.port))}\n\n`,
       );
       process.exit(1);
     } else {

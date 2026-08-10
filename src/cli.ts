@@ -119,9 +119,9 @@ ${c.bold('Usage')}
   ports ls               Print a one-shot table instead
 
 ${c.bold('Server options')}
-      --port <n>   Port to serve the UI on (default 7373)
-      --host <h>   Interface to bind (default 127.0.0.1)
-      --no-open    Do not open a browser
+      --port <n>        Port to serve the UI on (default 7373)
+      --host <h>        Interface to bind (default 127.0.0.1)
+      --no-open         Do not open a browser
       --no-screenshots  Skip page thumbnails (no headless browser)
 
 ${c.bold('Listing options')}

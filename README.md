@@ -19,11 +19,12 @@ $ ports ls
 ## Install
 
 ```bash
-npx @johan/ports             # zero-install, opens the live UI
-npm i -g @johan/ports        # then just: ports
+npx @baboons/ports             # zero-install, opens the live UI
+npm i -g @baboons/ports        # then just: ports
 ```
 
-Requires Node 20+. No runtime dependencies.
+Requires Node 20.19+. No runtime dependencies. (Screenshots additionally need
+Node 22.4+ and any installed Chromium-family browser.)
 
 ## Usage
 
@@ -35,9 +36,10 @@ ports                  Serve the live web UI and open it
 ports ls               Print a one-shot table instead
 
 Server options
-    --port <n>   Port to serve the UI on (default 7373)
-    --host <h>   Interface to bind (default 127.0.0.1)
-    --no-open    Do not open a browser
+    --port <n>        Port to serve the UI on (default 7373)
+    --host <h>        Interface to bind (default 127.0.0.1)
+    --no-open         Do not open a browser
+    --no-screenshots  Skip page thumbnails (no headless browser)
 
 Listing options
 -a, --all        Include listeners that do not speak HTTP
@@ -54,7 +56,7 @@ collision a hard error naming the process that holds it; the default port
 quietly moves aside instead. Ports below 1024 need root:
 
 ```bash
-sudo npx @johan/ports --port 80
+sudo npx @baboons/ports --port 80
 ```
 
 If an instance is already running on the target port, a second invocation
@@ -63,6 +65,25 @@ detects it and just opens the browser rather than starting a rival scanner.
 Run under `sudo` to also see other users' processes — unprivileged `lsof` only
 reports your own, so root-owned servers are found by the sweep but arrive
 without a PID or project name.
+
+### Screenshots
+
+Servers that answer **2xx with HTML** get a page thumbnail, shown inline in the
+list and full-width in grid view (`GRID` in the header, or `?view=grid`).
+
+Capture runs after each background scan, never before, so the board is usable
+immediately. Images are re-taken only when the page changes or after 15
+minutes, and orphaned ones are pruned.
+
+There is no Puppeteer dependency: `ports` drives an already-installed Chrome,
+Chromium, Edge or Brave over the DevTools Protocol, reusing one browser process
+for the whole batch. Point `PORTS_CHROME` at a binary to override detection, or
+pass `--no-screenshots` to switch the feature off. With no Chromium installed —
+or on Node older than 22.4, which lacks a global `WebSocket` — everything else
+works and thumbnails are simply absent.
+
+Chrome's own `--screenshot` flag is not used, because it waits for the network
+to fall idle and a dev server holding an HMR socket never does.
 
 ### Status filter
 
@@ -113,9 +134,9 @@ run the tree directly; `tsc` rewrites them to `.js` when building `dist/`.
 
 ## Caching
 
-State lives in `~/.cache/ports/` — `state.json` plus a content-addressed
-`favicons/` directory, written atomically so a crash mid-write cannot corrupt
-it. Two things make repeat runs fast:
+State lives in `~/.cache/ports/` — `state.json` plus content-addressed
+`favicons/` and `shots/` directories, written atomically so a crash mid-write
+cannot corrupt it. Two things make repeat runs fast:
 
 - **Per-port TTL.** A port whose description has not changed backs off
   exponentially, from 2s up to a 60s ceiling. Non-HTTP listeners sit at 120s,
@@ -132,8 +153,8 @@ rather than deleted, and appear under "Previously seen".
 
 ## Status
 
-Milestones 1–4 are complete: scanner core, cache and scheduler, server with
-SSE, and the live UI. Still to come:
+Complete: scanner core, cache and scheduler, SSE server, the live UI, and page
+screenshots. Still to come:
 
 5. **Index & search** — full-text search across titles, descriptions, commands
    and project names; grouping by project directory.

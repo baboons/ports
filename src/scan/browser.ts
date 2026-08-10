@@ -48,6 +48,14 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
+/**
+ * CDP needs a WebSocket client. Node exposes one globally from 22.4 onwards;
+ * on older runtimes everything else still works, there are just no thumbnails.
+ */
+export function canDriveBrowser(): boolean {
+  return typeof globalThis.WebSocket === 'function';
+}
+
 /** Locate a Chromium-family browser, or undefined if the host has none. */
 export async function findBrowser(): Promise<string | undefined> {
   const override = process.env['PORTS_CHROME'];
@@ -106,6 +114,9 @@ export class Screenshotter {
   }
 
   static async create(): Promise<Screenshotter | undefined> {
+    // Check the runtime before hunting for a browser, so an old Node never
+    // spawns Chrome only to fail on the first protocol message.
+    if (!canDriveBrowser()) return undefined;
     const executable = await findBrowser();
     return executable ? new Screenshotter(executable) : undefined;
   }

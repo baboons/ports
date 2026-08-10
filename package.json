@@ -1,7 +1,7 @@
 {
-  "name": "@johan/ports",
+  "name": "@baboons/ports",
   "version": "0.1.0",
-  "description": "Scan localhost for running HTTP/HTTPS servers and index them",
+  "description": "Scan localhost for running HTTP/HTTPS servers and browse them in a live dashboard",
   "type": "module",
   "bin": {
     "ports": "./dist/cli.js"
@@ -10,24 +10,40 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp -R src/ui dist/ui && chmod +x dist/cli.js",
+    "clean": "rm -rf dist",
+    "//build": "Cleans first: `cp -R src/ui dist/ui` nests into dist/ui/ui when the target already exists, which silently breaks static serving on a rebuild.",
+    "build": "npm run clean && tsc -p tsconfig.json && cp -R src/ui dist/ui && chmod +x dist/cli.js",
     "serve": "node --experimental-strip-types src/cli.ts",
-    "prepublishOnly": "npm run build",
-    "test": "node --test --experimental-strip-types test/*.test.ts",
     "dev": "tsc -p tsconfig.json --watch",
     "ls": "node --experimental-strip-types src/cli.ts ls",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "ports",
     "localhost",
-    "scanner",
-    "dev-servers"
+    "port-scanner",
+    "dev-servers",
+    "dashboard",
+    "cli"
   ],
   "license": "MIT",
+  "author": "Johan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baboons/ports.git"
+  },
+  "homepage": "https://github.com/baboons/ports#readme",
+  "bugs": {
+    "url": "https://github.com/baboons/ports/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "linkedom": "^0.18.13",

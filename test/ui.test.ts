@@ -12,7 +12,7 @@ const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src
  * we can drive. This exercises the actual shipped UI rather than a copy of its
  * logic, so filter and render regressions show up here.
  */
-async function boot(records: unknown[]) {
+async function boot(records: unknown[], search = '') {
   const html = await readFile(path.join(uiDir, 'index.html'), 'utf8');
   const script = await readFile(path.join(uiDir, 'app.js'), 'utf8');
   const { window, document } = parseHTML(html);
@@ -32,6 +32,8 @@ async function boot(records: unknown[]) {
 
   const store = new Map<string, string>();
   Object.assign(window, {
+    // linkedom has no location; the app reads it for ?view= overrides.
+    location: { search, href: `http://127.0.0.1:7373/${search}` },
     EventSource: StubEventSource,
     localStorage: {
       getItem: (k: string) => store.get(k) ?? null,
@@ -50,6 +52,7 @@ async function boot(records: unknown[]) {
     'EventSource',
     'requestAnimationFrame',
     'fetch',
+    'URLSearchParams',
     script,
   );
   fn(
@@ -59,6 +62,7 @@ async function boot(records: unknown[]) {
     StubEventSource,
     window.requestAnimationFrame,
     window.fetch,
+    URLSearchParams,
   );
 
   listeners['message']?.({
@@ -167,6 +171,52 @@ test('dead ports move to history and are not shown as live', async () => {
   assert.equal(document.querySelectorAll('#board .row').length, 1);
   assert.equal(document.getElementById('history-drawer')?.hasAttribute('hidden'), false);
   assert.equal(document.querySelectorAll('#history-board .row').length, 1);
+});
+
+test('a captured page shows its thumbnail in the default list view', async () => {
+  const { document } = await boot([
+    server(3000, 200, {
+      screenshot: { hash: 'aaaabbbbccccdddd', capturedAt: 1, width: 640, height: 400 },
+    }),
+    server(3001, 200),
+  ]);
+
+  // Regression guard: thumbnails used to exist only in grid view, so the
+  // default screen never showed one.
+  const thumb = document.querySelector('#board .row[data-port="3000"] img.thumb');
+  assert.equal(thumb?.getAttribute('src'), '/api/screenshot/aaaabbbbccccdddd');
+  assert.equal(
+    document.querySelector('#board .row[data-port="3001"] img.thumb'),
+    null,
+    'a server without a capture gets no thumbnail',
+  );
+});
+
+test('grid view renders cards with a shot or a placeholder', async () => {
+  const { document } = await boot(
+    [
+      server(3000, 200, {
+        screenshot: { hash: 'aaaabbbbccccdddd', capturedAt: 1, width: 640, height: 400 },
+      }),
+      server(3001, 200),
+    ],
+    '?view=grid',
+  );
+
+  assert.equal(document.getElementById('board')?.classList.contains('as-grid'), true);
+  assert.equal(
+    document.querySelector('#board .row[data-port="3000"] img.shot')?.getAttribute('src'),
+    '/api/screenshot/aaaabbbbccccdddd',
+  );
+  assert.ok(
+    document.querySelector('#board .row[data-port="3001"] .shot-placeholder'),
+    'a server with no capture falls back to a placeholder',
+  );
+});
+
+test('query parameters override saved view and filter state', async () => {
+  const { document } = await boot([server(3000, 200), server(3001, 404)], '?errors=1');
+  assert.equal(document.querySelectorAll('#board .row').length, 2, '?errors=1 reveals 4xx');
 });
 
 test('favicon hashes resolve to the same-origin proxy route', async () => {
