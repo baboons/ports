@@ -30,6 +30,9 @@
           <button data-filter="err" aria-pressed="false">
             4xx–5xx <em id="count-err">0</em>
           </button>
+          <button data-filter="local" id="filter-local" hidden aria-pressed="false">
+            loopback <em id="count-local">0</em>
+          </button>
         </div>
         <div class="seg" role="group" aria-label="View">
           <button data-view="list" class="on" aria-pressed="true" title="Dense list">LIST</button>
@@ -43,6 +46,8 @@
     </header>
 
     <div class="phase" id="phase"></div>
+
+    <p class="notice" id="notice" hidden></p>
 
     <main>
       <section class="board" id="board" aria-live="polite"></section>
@@ -64,6 +69,15 @@
           <span class="hint">accept connections but do not speak HTTP</span>
         </summary>
         <div class="board sub-board" id="tcp-board"></div>
+      </details>
+
+      <details class="drawer" id="curated-drawer" hidden>
+        <summary>
+          <span class="chev">▸</span> Hidden by you
+          <em id="count-curated">0</em>
+          <span class="hint">click + to bring one back</span>
+        </summary>
+        <div class="board sub-board" id="curated-board"></div>
       </details>
 
       <details class="drawer" id="history-drawer" hidden>

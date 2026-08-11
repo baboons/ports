@@ -322,6 +322,11 @@ export async function probePort(
         status: res.firstStatus || res.status,
         ...(res.statusText ? { statusText: res.statusText } : {}),
         ...(res.redirectTo ? { redirectTo: res.redirectTo } : {}),
+        // Recorded only when we actually followed the chain, which fetchHead
+        // does only within loopback.
+        ...(res.status !== res.firstStatus
+          ? { finalStatus: res.status, finalUrl: res.finalUrl }
+          : {}),
         ...(res.headers['server'] ? { server: res.headers['server'] } : {}),
         ...(res.headers['x-powered-by'] ? { poweredBy: res.headers['x-powered-by'] } : {}),
         ...(res.headers['content-type'] ? { contentType: res.headers['content-type'] } : {}),

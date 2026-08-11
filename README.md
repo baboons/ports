@@ -23,8 +23,8 @@ npx @baboons/ports             # zero-install, opens the live UI
 npm i -g @baboons/ports        # then just: ports
 ```
 
-Requires Node 20.19+. No runtime dependencies. (Screenshots additionally need
-Node 22.4+ and any installed Chromium-family browser.)
+Requires Node 20.19+. No runtime dependencies. Screenshots additionally need
+any installed Chromium-family browser.
 
 ## Usage
 
@@ -62,6 +62,19 @@ sudo npx @baboons/ports --port 80
 If an instance is already running on the target port, a second invocation
 detects it and just opens the browser rather than starting a rival scanner.
 
+### Serving to other machines
+
+`--host 0.0.0.0` exposes the board on the LAN, which is how you would run it on
+a NAS or dev box. Links are built from whatever host you opened the board on —
+`nas.local`, a LAN IP, a tunnel hostname — never from the loopback address the
+scanner probes, so clicking a row reaches the right machine. Services bound only
+to `127.0.0.1` genuinely cannot be reached from elsewhere; those are tagged
+`loopback only` when you are viewing remotely, instead of handing you a link
+that times out.
+
+Note that this publishes a full inventory of the machine's listening ports to
+anyone who can reach that address, so keep it to networks you trust.
+
 Run under `sudo` to also see other users' processes — unprivileged `lsof` only
 reports your own, so root-owned servers are found by the sweep but arrive
 without a PID or project name.
@@ -75,21 +88,107 @@ Capture runs after each background scan, never before, so the board is usable
 immediately. Images are re-taken only when the page changes or after 15
 minutes, and orphaned ones are pruned.
 
+Redirects are followed: a server whose `/` answers 301 or 302 is captured at
+wherever the chain lands, which is the normal shape for a dev server sending
+you to `/login` or `/dashboard`. Two cases are deliberately skipped — a chain
+that ends on an error page, and one that leaves this machine. The second
+matters because Chrome follows redirects itself, so without the check a
+localhost port pointing at an external site would have us fetching and storing
+a picture of a public website.
+
 There is no Puppeteer dependency: `ports` drives an already-installed Chrome,
 Chromium, Edge or Brave over the DevTools Protocol, reusing one browser process
-for the whole batch. Point `PORTS_CHROME` at a binary to override detection, or
-pass `--no-screenshots` to switch the feature off. With no Chromium installed —
-or on Node older than 22.4, which lacks a global `WebSocket` — everything else
-works and thumbnails are simply absent.
+for the whole batch. Detection checks the usual install paths and then `PATH`;
+point `PORTS_CHROME` at a binary to override it, or pass `--no-screenshots` to
+switch the feature off.
+
+If thumbnails cannot work, the reason is printed at startup and served from
+`/api/health` rather than leaving you with silent blanks:
+
+```
+  ports · http://127.0.0.1:7373/
+  screenshots off: no Chrome/Chromium/Edge/Brave found — install one, or set PORTS_CHROME=/path/to/binary
+```
+
+**On a headless box or NAS**, install any Chromium build (`apt install chromium`
+is enough). Running as root — normal on a NAS or in a container — is handled:
+Chrome refuses to start as root with its sandbox on, so `--no-sandbox` is added
+automatically, along with `--disable-dev-shm-usage` for the small `/dev/shm` in
+most container images.
+
+CDP is spoken over a WebSocket client bundled with the package rather than
+Node's global one, which only exists from 22.4. Screenshots therefore work on
+Node 20 as well, matching the engine range the package actually claims.
 
 Chrome's own `--screenshot` flag is not used, because it waits for the network
 to fall idle and a dev server holding an HMR socket never does.
+
+### Curating what you see
+
+Most of a real machine's listening ports are app IPC endpoints you will never
+open. Hide them:
+
+```bash
+ports hide 6463 44450     # from the board and from ls
+ports unhide 6463
+ports hidden              # what is hidden, and where the file lives
+```
+
+In the board, hover a row and click **×**; hidden entries collect in a
+*Hidden by you* drawer where **+** restores them.
+
+Rules live in `~/.config/ports/curation.json`, which is pretty-printed and
+meant to be edited by hand:
+
+```json
+{
+  "version": 1,
+  "hiddenPorts": [6463],
+  "hiddenRanges": ["44000-44999"],
+  "hiddenCommands": ["Discord", "figma"]
+}
+```
+
+`hiddenCommands` matches case-insensitively against the process name and full
+command line, which is the quickest way to silence an app that scatters
+listeners across changing ports. Edits are picked up while the server runs, and
+clicking hide never rewrites rules you added by hand.
+
+Un-hiding only removes an exact-port rule. If a range or command rule still
+covers that port the UI says so, rather than leaving a button that appears to
+do nothing.
 
 ### Status filter
 
 Most localhost endpoints returning 4xx/5xx are internal IPC helpers you would
 never open, so the board hides them by default and shows a count you can click
-to reveal. Toggle either bucket from the header; the choice is remembered.
+to reveal. Toggle from the header; the choice is remembered per host.
+
+A third chip appears when it matters: **loopback**. Services bound only to
+`127.0.0.1` cannot be reached from another machine, so when you open the board
+remotely they are filtered out by default and the count says why. Viewed on the
+machine itself the chip stays hidden, since there almost everything is loopback
+and filtering would empty the board. Override with `?local=1`.
+
+## Running as a service
+
+```bash
+sudo ports service install --port 80 --host 0.0.0.0   # systemd, system-wide
+ports service install --user                          # systemd, just for you
+ports service status
+ports service uninstall
+ports service print                                   # see the unit, change nothing
+```
+
+On Linux this writes a systemd unit; on macOS a launchd agent. `ExecStart` is
+resolved from the running process, so it stays correct whether ports was
+installed globally, run through npx, or is a source checkout.
+
+A system-wide unit runs as **root** on purpose: that is what allows binding a
+privileged port and what lets `lsof` see every user's processes, which is the
+point of a machine-wide dashboard. Use `--user` if you would rather it ran as
+you and saw only your own listeners — note that a user unit stops at logout
+unless you enable lingering, which the installer reminds you about.
 
 ## How it works
 

@@ -5,10 +5,19 @@ import { isSweepDue } from './scan/scheduler.ts';
 import { loadCache, saveCache } from './cache/store.ts';
 import { c, renderTable } from './cli/format.ts';
 import { serve } from './cli/serve.ts';
+import { service, type ServiceAction } from './cli/service.ts';
+import {
+  curationPath,
+  hideReasonFor,
+  loadCuration,
+  saveCuration,
+  withHidden,
+  withoutHidden,
+} from './config/curation.ts';
 import type { PortRecord, ScanProgress } from './shared/types.ts';
 
 interface Args {
-  command: 'serve' | 'ls' | 'help';
+  command: 'serve' | 'ls' | 'hide' | 'unhide' | 'hidden' | 'service' | 'help';
   json: boolean;
   all: boolean;
   fast: boolean;
@@ -19,6 +28,10 @@ interface Args {
   port?: number;
   host?: string;
   open: boolean;
+  /** Positional arguments, e.g. the ports given to `hide`. */
+  rest: string[];
+  serviceAction: ServiceAction;
+  serviceUser: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -33,6 +46,9 @@ function parseArgs(argv: string[]): Args {
     noCache: false,
     screenshots: true,
     open: true,
+    rest: [],
+    serviceAction: 'status',
+    serviceUser: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -68,6 +84,22 @@ function parseArgs(argv: string[]): Args {
         break;
       case 'ls':
         args.command = 'ls';
+        break;
+      case 'hide':
+        args.command = 'hide';
+        break;
+      case 'unhide':
+      case 'show':
+        args.command = 'unhide';
+        break;
+      case 'hidden':
+        args.command = 'hidden';
+        break;
+      case 'service':
+        args.command = 'service';
+        break;
+      case '--user':
+        args.serviceUser = true;
         break;
       case '--no-open':
         args.open = false;
@@ -105,6 +137,12 @@ function parseArgs(argv: string[]): Args {
           process.stderr.write(`Unknown option: ${arg}\n`);
           process.exit(2);
         }
+        // `service install`, and the port numbers given to hide/unhide.
+        if (args.command === 'service' && ['install', 'uninstall', 'status', 'print'].includes(arg)) {
+          args.serviceAction = arg as ServiceAction;
+        } else {
+          args.rest.push(arg);
+        }
     }
   }
 
@@ -133,10 +171,24 @@ ${c.bold('Listing options')}
   -q, --quiet      Suppress the progress line
   -h, --help       Show this help
 
+${c.bold('Curation')}
+  ports hide <port...>     Hide ports from the board and from ls
+  ports unhide <port...>   Bring them back
+  ports hidden             Show the current rules and where they live
+
+${c.bold('Service')}
+  ports service install    Install as a systemd (Linux) or launchd (macOS) service
+  ports service uninstall  Remove it
+  ports service status     Is it running?
+  ports service print      Print the unit file without installing anything
+      --user               Install for the current user instead of system-wide
+
 ${c.bold('Examples')}
   ports --port 8080
   sudo ports --port 80
   ports ls --json | jq '.[] | select(.protocol=="https")'
+  ports hide 6463 44450
+  sudo ports service install --port 80 --host 0.0.0.0
 `;
 
 /** A single rewritten status line, so progress does not scroll the terminal. */
@@ -181,6 +233,64 @@ async function main(): Promise<void> {
 
   if (args.command === 'help') {
     process.stdout.write(`${HELP}\n`);
+    return;
+  }
+
+  if (args.command === 'service') {
+    await service({
+      action: args.serviceAction,
+      user: args.serviceUser,
+      ...(args.port !== undefined ? { port: args.port } : {}),
+      ...(args.host !== undefined ? { host: args.host } : {}),
+      screenshots: args.screenshots,
+    });
+    return;
+  }
+
+  if (args.command === 'hide' || args.command === 'unhide') {
+    const ports = args.rest
+      .map((value) => Number.parseInt(value, 10))
+      .filter((port) => Number.isInteger(port) && port >= 1 && port <= 65535);
+
+    if (ports.length === 0) {
+      process.stderr.write(`\n  Usage: ports ${args.command} <port> [port...]\n\n`);
+      process.exit(2);
+    }
+
+    let curation = await loadCuration();
+    for (const port of ports) {
+      curation = args.command === 'hide' ? withHidden(curation, port) : withoutHidden(curation, port);
+    }
+    await saveCuration(curation);
+
+    const verb = args.command === 'hide' ? 'hidden' : 'shown';
+    process.stdout.write(`\n  ${ports.join(', ')} ${verb}\n`);
+    process.stdout.write(c.dim(`  ${curationPath()}\n\n`));
+    return;
+  }
+
+  if (args.command === 'hidden') {
+    const curation = await loadCuration();
+    const empty =
+      curation.hiddenPorts.length === 0 &&
+      curation.hiddenRanges.length === 0 &&
+      curation.hiddenCommands.length === 0;
+
+    process.stdout.write('\n');
+    if (empty) {
+      process.stdout.write(c.dim('  nothing hidden\n'));
+    } else {
+      if (curation.hiddenPorts.length) {
+        process.stdout.write(`  ports     ${curation.hiddenPorts.join(', ')}\n`);
+      }
+      if (curation.hiddenRanges.length) {
+        process.stdout.write(`  ranges    ${curation.hiddenRanges.join(', ')}\n`);
+      }
+      if (curation.hiddenCommands.length) {
+        process.stdout.write(`  commands  ${curation.hiddenCommands.join(', ')}\n`);
+      }
+    }
+    process.stdout.write(c.dim(`  ${curationPath()}\n\n`));
     return;
   }
 
@@ -258,8 +368,13 @@ async function main(): Promise<void> {
   }
 
   // Dead entries are kept in the cache for the index, but `ls` is a view of
-  // what is running right now.
-  const live = merged.filter((r) => r.alive);
+  // what is running right now. Curated-away ports drop out too unless asked
+  // for, so the terminal and the board agree on what you chose to see.
+  const curation = await loadCuration();
+  const curated = merged.filter((r) => hideReasonFor(r, curation) !== undefined);
+  const live = merged
+    .filter((r) => r.alive)
+    .filter((r) => args.all || hideReasonFor(r, curation) === undefined);
   const web = live.filter((r) => r.protocol === 'http' || r.protocol === 'https');
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 
@@ -279,6 +394,11 @@ async function main(): Promise<void> {
   process.stdout.write(c.dim(`  ${parts.join(' · ')}`));
   process.stdout.write('\n');
 
+  if (curated.length > 0 && !args.all) {
+    process.stdout.write(
+      c.gray(`  ${curated.length} hidden by curation — 'ports hidden' to review, -a to include.\n`),
+    );
+  }
   if (!deep && !args.fast) {
     process.stdout.write(
       c.gray('  Full port sweep skipped; still fresh. Use --refresh to force one.\n'),

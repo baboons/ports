@@ -10,7 +10,16 @@ import { createCacheWriter, loadCache, type CacheState } from '../cache/store.ts
 import { readFavicon } from '../cache/favicons.ts';
 import { pruneScreenshots, readScreenshot } from '../cache/screenshots.ts';
 import { captureAll } from '../scan/capture.ts';
+import { screenshotAvailability } from '../scan/browser.ts';
 import { createHub } from './sse.ts';
+import {
+  hideReasonFor,
+  loadCuration,
+  saveCuration,
+  withHidden,
+  withoutHidden,
+  type Curation,
+} from '../config/curation.ts';
 
 /** Identifies our own instance when probing a port that is already taken. */
 export const HEALTH_SIGNATURE = 'ports-scanner';
@@ -29,6 +38,8 @@ export interface ServerOptions {
 export interface RunningServer {
   port: number;
   url: string;
+  /** Why thumbnails are unavailable here, if they are. */
+  screenshotIssue?: string;
   close: () => Promise<void>;
 }
 
@@ -57,6 +68,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
   const hub = createHub();
   const cache: CacheState = await loadCache();
+  let curation: Curation = await loadCuration();
   const writer = createCacheWriter(1000);
 
   /** The live index, keyed by port. Cache entries start out stale. */
@@ -73,8 +85,20 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     done: true,
   };
 
+  /**
+   * Stamp the current curation onto a record on the way out.
+   *
+   * Applied at serve time rather than stored, so a curation change never has
+   * to invalidate the scan cache.
+   */
+  const decorate = (record: PortRecord): PortRecord => {
+    const reason = hideReasonFor(record, curation);
+    if (!reason) return record.hidden ? { ...record, hidden: false, hiddenBy: undefined } : record;
+    return { ...record, hidden: true, hiddenBy: reason };
+  };
+
   const snapshotRecords = () =>
-    [...index.values()].sort((a, b) => a.port - b.port);
+    [...index.values()].map(decorate).sort((a, b) => a.port - b.port);
 
   const persist = () => {
     writer.schedule({ ...cache, lastFullSweep, records: snapshotRecords() });
@@ -89,6 +113,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (scanning || stopped) return;
     scanning = true;
     try {
+      await refreshCuration();
       const deep = force || isSweepDue(lastFullSweep);
       const result = await scan({
         deep,
@@ -102,7 +127,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         },
         onRecords: (records) => {
           for (const record of records) index.set(record.port, record);
-          hub.send({ type: 'upsert', records });
+          hub.send({ type: 'upsert', records: records.map(decorate) });
         },
       });
 
@@ -123,6 +148,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     }
   };
 
+  /**
+   * Re-read curation.json from disk.
+   *
+   * The file is documented as hand-editable, so the in-memory copy has to be
+   * refreshed rather than trusted: without this, an edit made while the server
+   * runs is both invisible *and* silently overwritten by the next hide click.
+   */
+  const refreshCuration = async (): Promise<void> => {
+    curation = await loadCuration();
+  };
+
+  let screenshotIssue: string | undefined;
   let capturing = false;
   const captureThumbnails = async (): Promise<void> => {
     if (capturing || stopped) return;
@@ -132,7 +169,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         skipPort: options.port,
         onCaptured: (record) => {
           index.set(record.port, record);
-          hub.send({ type: 'upsert', records: [record] });
+          hub.send({ type: 'upsert', records: [decorate(record)] });
+        },
+        onProblem: (reason) => {
+          screenshotIssue = reason;
+        },
+        // A success clears any earlier report, so the health endpoint reflects
+        // the current state rather than the worst thing that ever happened.
+        onWorking: () => {
+          screenshotIssue = undefined;
         },
       });
       if (captured > 0) {
@@ -173,7 +218,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     const route = url.pathname;
 
     if (route === '/api/health') {
-      return json(res, 200, { app: HEALTH_SIGNATURE, port: options.port, pid: process.pid });
+      return json(res, 200, {
+        app: HEALTH_SIGNATURE,
+        port: options.port,
+        pid: process.pid,
+        screenshots: options.screenshots === false
+          ? { enabled: false, reason: 'disabled with --no-screenshots' }
+          : { enabled: !screenshotIssue, ...(screenshotIssue ? { reason: screenshotIssue } : {}) },
+      });
     }
 
     if (route === '/api/ports') {
@@ -191,6 +243,36 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         })}\n\n`,
       );
       return;
+    }
+
+    if ((route === '/api/hide' || route === '/api/unhide') && req.method === 'POST') {
+      const port = Number.parseInt(url.searchParams.get('port') ?? '', 10);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return json(res, 400, { error: 'a valid ?port= is required' });
+      }
+
+      // Pick up any hand-edits before mutating, so writing one port back does
+      // not clobber rules the user added since startup.
+      await refreshCuration();
+      curation =
+        route === '/api/hide' ? withHidden(curation, port) : withoutHidden(curation, port);
+      await saveCuration(curation);
+
+      const record = index.get(port);
+      if (record) hub.sendNow({ type: 'upsert', records: [decorate(record)] });
+
+      return json(res, 200, {
+        port,
+        hidden: route === '/api/hide',
+        // Say so when a broader rule still hides it, rather than reporting
+        // success for a change the user will not see.
+        stillHiddenBy: record ? hideReasonFor(record, curation) : undefined,
+      });
+    }
+
+    if (route === '/api/curation') {
+      await refreshCuration();
+      return json(res, 200, curation);
     }
 
     if (route === '/api/rescan' && req.method === 'POST') {
@@ -269,8 +351,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // Kick off the first pass immediately; clients already have cached data.
   void runScan(false);
 
+  const availability =
+    options.screenshots === false ? { ok: false } : await screenshotAvailability();
+  if (!availability.ok && availability.reason) screenshotIssue = availability.reason;
+
   return {
     port: options.port,
+    ...(options.screenshots !== false && availability.reason
+      ? { screenshotIssue: availability.reason }
+      : {}),
     url: `http://${options.host === '0.0.0.0' ? 'localhost' : options.host}:${options.port}/`,
     async close() {
       stopped = true;

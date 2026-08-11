@@ -83,10 +83,20 @@ export interface ProcessInfo {
 
 /** The result of actually speaking HTTP to the port. */
 export interface HttpInfo {
+  /** The first status the port returned, before any redirect was followed. */
   status: number;
   statusText?: string;
   /** Where a 3xx pointed us. */
   redirectTo?: string;
+  /**
+   * Status after following redirects, when it differs from `status`.
+   *
+   * Only set when the whole chain stayed on loopback: an external redirect is
+   * left unfollowed, so its absence means "this 3xx leads off this machine".
+   */
+  finalStatus?: number;
+  /** The URL the redirect chain settled on, if it moved. */
+  finalUrl?: string;
   server?: string;
   poweredBy?: string;
   contentType?: string;
@@ -114,6 +124,10 @@ export interface PortRecord {
   stale: boolean;
   /** This is the ports server itself. */
   isSelf: boolean;
+  /** Curated out of the default view by the user. */
+  hidden?: boolean;
+  /** Which rule hid it, so the UI can explain what a restore will do. */
+  hiddenBy?: 'port' | 'range' | 'command';
 
   http?: HttpInfo;
   meta?: PageMeta;

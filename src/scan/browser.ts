@@ -3,6 +3,7 @@ import { access, mkdtemp, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { CdpSocket } from './ws.ts';
 
 /**
  * A very small Chrome DevTools Protocol client, used only to take screenshots.
@@ -13,7 +14,9 @@ import path from 'node:path';
  * instead, and reuse one browser process across every capture rather than
  * paying a ~4s cold start each time.
  *
- * Node 24 ships a native WebSocket, so this needs no dependency.
+ * The WebSocket client is our own (see ws.ts) rather than Node's global, which
+ * only exists from 22.4: this package supports Node 20, and a NAS or Debian box
+ * is exactly where the older runtime turns up.
  */
 
 const CANDIDATES_DARWIN = [
@@ -30,7 +33,27 @@ const CANDIDATES_LINUX = [
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
   '/snap/bin/chromium',
+  '/usr/lib/chromium/chromium',
+  '/usr/lib/chromium-browser/chromium-browser',
+  '/var/lib/flatpak/exports/bin/org.chromium.Chromium',
   '/usr/bin/microsoft-edge',
+  '/usr/bin/brave-browser',
+  '/opt/google/chrome/chrome',
+];
+
+/**
+ * Binary names to look for on PATH.
+ *
+ * NAS and container images put browsers in places no fixed list predicts, so
+ * the absolute candidates above are only the fast path.
+ */
+const PATH_NAMES = [
+  'google-chrome',
+  'google-chrome-stable',
+  'chromium',
+  'chromium-browser',
+  'brave-browser',
+  'microsoft-edge',
 ];
 
 const CANDIDATES_WIN = [
@@ -48,14 +71,6 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-/**
- * CDP needs a WebSocket client. Node exposes one globally from 22.4 onwards;
- * on older runtimes everything else still works, there are just no thumbnails.
- */
-export function canDriveBrowser(): boolean {
-  return typeof globalThis.WebSocket === 'function';
-}
-
 /** Locate a Chromium-family browser, or undefined if the host has none. */
 export async function findBrowser(): Promise<string | undefined> {
   const override = process.env['PORTS_CHROME'];
@@ -71,7 +86,45 @@ export async function findBrowser(): Promise<string | undefined> {
   for (const candidate of list) {
     if (await exists(candidate)) return candidate;
   }
+
+  // Fall back to PATH, which is how most non-standard installs are reachable.
+  if (process.platform !== 'win32') {
+    const dirs = (process.env['PATH'] ?? '').split(path.delimiter).filter(Boolean);
+    for (const dir of dirs) {
+      for (const name of PATH_NAMES) {
+        const candidate = path.join(dir, name);
+        if (await exists(candidate)) return candidate;
+      }
+    }
+  }
+
   return undefined;
+}
+
+export interface ScreenshotAvailability {
+  ok: boolean;
+  reason?: string;
+  executable?: string;
+}
+
+/**
+ * Why screenshots will or will not work here.
+ *
+ * The capture path degrades silently by design, which is right for a feature
+ * nobody asked for - but it leaves someone on a headless box with no way to
+ * tell whether it is broken or simply unavailable. This spells it out.
+ */
+export async function screenshotAvailability(): Promise<ScreenshotAvailability> {
+  const executable = await findBrowser();
+  if (!executable) {
+    return {
+      ok: false,
+      reason:
+        'no Chrome/Chromium/Edge/Brave found — install one, or set PORTS_CHROME=/path/to/binary',
+    };
+  }
+
+  return { ok: true, executable };
 }
 
 interface Pending {
@@ -102,53 +155,72 @@ export interface Capture {
 
 export class Screenshotter {
   #proc: ChildProcess | undefined;
-  #ws: WebSocket | undefined;
+  #ws: CdpSocket | undefined;
   #profileDir: string | undefined;
   #nextId = 1;
   #pending = new Map<number, Pending>();
   #starting: Promise<void> | undefined;
   #executable: string;
+  /** Why the most recent capture failed, for diagnostics. */
+  lastError: string | undefined;
+  /**
+   * True when the browser itself would not start.
+   *
+   * Distinct from a page that failed to render: a startup failure affects
+   * every capture equally and is worth reporting and giving up on, whereas one
+   * slow page says nothing about the next.
+   */
+  startupFailed = false;
 
   constructor(executable: string) {
     this.#executable = executable;
   }
 
   static async create(): Promise<Screenshotter | undefined> {
-    // Check the runtime before hunting for a browser, so an old Node never
-    // spawns Chrome only to fail on the first protocol message.
-    if (!canDriveBrowser()) return undefined;
     const executable = await findBrowser();
     return executable ? new Screenshotter(executable) : undefined;
   }
 
   async #start(): Promise<void> {
-    if (this.#ws && this.#ws.readyState === WebSocket.OPEN) return;
+    if (this.#ws?.connected) return;
     if (this.#starting) return this.#starting;
 
     this.#starting = (async () => {
       // A throwaway profile keeps us out of the user's real Chrome session.
       this.#profileDir = await mkdtemp(path.join(os.tmpdir(), 'ports-shots-'));
 
-      const proc = spawn(
-        this.#executable,
-        [
-          '--headless=new',
-          '--remote-debugging-port=0',
-          `--user-data-dir=${this.#profileDir}`,
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-gpu',
-          '--hide-scrollbars',
-          '--mute-audio',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--disable-sync',
-          // Dev servers overwhelmingly use self-signed certificates.
-          '--ignore-certificate-errors',
-          '--allow-insecure-localhost',
-        ],
-        { stdio: ['ignore', 'ignore', 'pipe'] },
-      );
+      const args = [
+        '--headless=new',
+        '--remote-debugging-port=0',
+        `--user-data-dir=${this.#profileDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-gpu',
+        '--hide-scrollbars',
+        '--mute-audio',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+        // Dev servers overwhelmingly use self-signed certificates.
+        '--ignore-certificate-errors',
+        '--allow-insecure-localhost',
+      ];
+
+      if (process.platform === 'linux') {
+        // Containers and NAS images ship a tiny /dev/shm, which Chrome will
+        // exhaust and crash on mid-render.
+        args.push('--disable-dev-shm-usage');
+
+        // Chrome flatly refuses to start as root with its sandbox enabled, and
+        // running as root is the norm on a NAS or in a container. The sandbox
+        // guards against hostile page content; here the pages are servers on
+        // this same machine, already reachable by the user we are running as.
+        if (typeof process.getuid === 'function' && process.getuid() === 0) {
+          args.push('--no-sandbox', '--disable-setuid-sandbox');
+        }
+      }
+
+      const proc = spawn(this.#executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
       this.#proc = proc;
 
       // Chrome prints the devtools URL to stderr once it is listening.
@@ -168,49 +240,48 @@ export class Screenshotter {
           clearTimeout(timer);
           reject(err);
         });
-        proc.once('exit', () => {
+        proc.once('exit', (code) => {
           clearTimeout(timer);
-          reject(new Error('browser exited during startup'));
+          // Chrome explains itself on stderr ("Running as root without
+          // --no-sandbox is not supported", missing shared libraries, ...).
+          // Passing that through is the difference between a fixable report
+          // and a shrug.
+          const detail = buffer.trim().split('\n').filter(Boolean).slice(-2).join(' / ');
+          reject(
+            new Error(
+              `browser exited during startup (code ${code})${detail ? `: ${detail}` : ''}`,
+            ),
+          );
         });
       });
 
-      const ws = new WebSocket(endpoint);
+      const ws = new CdpSocket();
+      ws.on({
+        onMessage: (data) => {
+          let msg: { id?: number; result?: unknown; error?: { message?: string } };
+          try {
+            msg = JSON.parse(data);
+          } catch {
+            return;
+          }
+          if (typeof msg.id !== 'number') return;
+          const pending = this.#pending.get(msg.id);
+          if (!pending) return;
+          this.#pending.delete(msg.id);
+          if (msg.error) pending.reject(new Error(msg.error.message ?? 'cdp error'));
+          else pending.resolve(msg.result);
+        },
+        onClose: () => {
+          for (const pending of this.#pending.values()) {
+            pending.reject(new Error('devtools disconnected'));
+          }
+          this.#pending.clear();
+          this.#ws = undefined;
+        },
+      });
+
+      await ws.connect(endpoint);
       this.#ws = ws;
-
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('devtools connect timeout')), 10_000);
-        ws.addEventListener('open', () => {
-          clearTimeout(timer);
-          resolve();
-        });
-        ws.addEventListener('error', () => {
-          clearTimeout(timer);
-          reject(new Error('devtools connect failed'));
-        });
-      });
-
-      ws.addEventListener('message', (event) => {
-        let msg: { id?: number; result?: unknown; error?: { message?: string } };
-        try {
-          msg = JSON.parse(String(event.data));
-        } catch {
-          return;
-        }
-        if (typeof msg.id !== 'number') return;
-        const pending = this.#pending.get(msg.id);
-        if (!pending) return;
-        this.#pending.delete(msg.id);
-        if (msg.error) pending.reject(new Error(msg.error.message ?? 'cdp error'));
-        else pending.resolve(msg.result);
-      });
-
-      ws.addEventListener('close', () => {
-        for (const pending of this.#pending.values()) {
-          pending.reject(new Error('devtools disconnected'));
-        }
-        this.#pending.clear();
-        this.#ws = undefined;
-      });
     })();
 
     try {
@@ -222,7 +293,7 @@ export class Screenshotter {
 
   #send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<unknown> {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws?.connected) {
       return Promise.reject(new Error('devtools not connected'));
     }
     const id = this.#nextId++;
@@ -235,7 +306,13 @@ export class Screenshotter {
         if (this.#pending.delete(id)) reject(new Error(`${method} timed out`));
       }, 20_000);
       timer.unref?.();
-      ws.send(JSON.stringify(payload));
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch (err) {
+        this.#pending.delete(id);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
@@ -259,7 +336,13 @@ export class Screenshotter {
     let sessionId: string | undefined;
 
     const work = async (): Promise<Capture | undefined> => {
-      await this.#start();
+      try {
+        await this.#start();
+      } catch (err) {
+        // The browser is unusable; every later capture will fail identically.
+        this.startupFailed = true;
+        throw err;
+      }
 
       // No width/height here: Chrome rejects them outside new-window creation
       // ("Target position can only be set for new windows"). The viewport is
@@ -317,7 +400,8 @@ export class Screenshotter {
           setTimeout(() => reject(new Error('capture timeout')), timeoutMs),
         ),
       ]);
-    } catch {
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
       return undefined;
     } finally {
       if (targetId) {

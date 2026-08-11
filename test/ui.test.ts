@@ -12,7 +12,7 @@ const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src
  * we can drive. This exercises the actual shipped UI rather than a copy of its
  * logic, so filter and render regressions show up here.
  */
-async function boot(records: unknown[], search = '') {
+async function boot(records: unknown[], search = '', hostname = '127.0.0.1') {
   const html = await readFile(path.join(uiDir, 'index.html'), 'utf8');
   const script = await readFile(path.join(uiDir, 'app.js'), 'utf8');
   const { window, document } = parseHTML(html);
@@ -33,7 +33,7 @@ async function boot(records: unknown[], search = '') {
   const store = new Map<string, string>();
   Object.assign(window, {
     // linkedom has no location; the app reads it for ?view= overrides.
-    location: { search, href: `http://127.0.0.1:7373/${search}` },
+    location: { search, hostname, href: `http://${hostname}:7373/${search}` },
     EventSource: StubEventSource,
     localStorage: {
       getItem: (k: string) => store.get(k) ?? null,
@@ -148,6 +148,121 @@ test('web servers render as real anchors pointing at the right origin', async ()
 
   const https = document.querySelector('#board .row[data-port="8443"]');
   assert.equal(https?.getAttribute('href'), 'https://127.0.0.1:8443/');
+});
+
+test('links follow the host the board was opened on, not the probe address', async () => {
+  // Served on 0.0.0.0 and opened from another machine: links must point at the
+  // machine running the scanner, never the viewer's own loopback.
+  // ?local=1 keeps loopback-bound rows visible; this test is about the href,
+  // not the reachability filter.
+  const { document } = await boot(
+    [server(5173, 200, { probedAddress: '127.0.0.1' })],
+    '?local=1',
+    'nas.local',
+  );
+
+  assert.equal(
+    document.querySelector('#board .row[data-port="5173"]')?.getAttribute('href'),
+    'http://nas.local:5173/',
+  );
+});
+
+test('an IPv6 host stays bracketed in generated links', async () => {
+  const { document } = await boot([server(5173, 200)], '?local=1', '[fd00::1]');
+  assert.equal(
+    document.querySelector('#board .row[data-port="5173"]')?.getAttribute('href'),
+    'http://[fd00::1]:5173/',
+  );
+});
+
+test('loopback-only services are flagged when viewed remotely', async () => {
+  const remote = await boot(
+    [server(5173, 200, { addresses: ['127.0.0.1'] }), server(5174, 200, { addresses: ['0.0.0.0'] })],
+    '?local=1',
+    'nas.local',
+  );
+  const tags = [...remote.document.querySelectorAll('#board .row[data-port="5173"] .tag')].map(
+    (t) => t.textContent,
+  );
+  assert.ok(tags.includes('loopback only'), 'a 127.0.0.1-only service is unreachable remotely');
+
+  const wildcard = [...remote.document.querySelectorAll('#board .row[data-port="5174"] .tag')].map(
+    (t) => t.textContent,
+  );
+  assert.ok(!wildcard.includes('loopback only'), 'a 0.0.0.0 bind is reachable');
+
+  // Viewed locally the warning is noise.
+  const local = await boot([server(5173, 200, { addresses: ['127.0.0.1'] })], '', '127.0.0.1');
+  const localTags = [...local.document.querySelectorAll('#board .row .tag')].map(
+    (t) => t.textContent,
+  );
+  assert.ok(!localTags.includes('loopback only'));
+});
+
+test('loopback-only servers are filtered out when viewed remotely', async () => {
+  const { document } = await boot(
+    [
+      server(5173, 200, { addresses: ['127.0.0.1'] }),
+      server(5174, 200, { addresses: ['0.0.0.0'] }),
+    ],
+    '',
+    'nas.local',
+  );
+
+  const ports = [...document.querySelectorAll('#board .row')].map((r) =>
+    r.getAttribute('data-port'),
+  );
+  assert.deepEqual(ports, ['5174'], 'only the reachable one is listed');
+  assert.match(
+    document.getElementById('hidden-text')!.textContent!,
+    /unreachable from here/,
+    'and the reason is stated',
+  );
+});
+
+test('loopback-only servers are shown when viewed locally', async () => {
+  // Everything is loopback on the machine itself; filtering by default there
+  // would leave an empty board.
+  const { document } = await boot([server(5173, 200, { addresses: ['127.0.0.1'] })], '', '127.0.0.1');
+  assert.equal(document.querySelectorAll('#board .row').length, 1);
+  assert.equal(document.getElementById('filter-local')?.hasAttribute('hidden'), true);
+});
+
+test('?local=1 overrides the remote default', async () => {
+  const { document } = await boot(
+    [server(5173, 200, { addresses: ['127.0.0.1'] })],
+    '?local=1',
+    'nas.local',
+  );
+  assert.equal(document.querySelectorAll('#board .row').length, 1);
+});
+
+test('curated records move to the hidden drawer with a restore control', async () => {
+  const { document } = await boot([
+    server(3000, 200),
+    server(6463, 200, { hidden: true, hiddenBy: 'port' }),
+  ]);
+
+  const board = [...document.querySelectorAll('#board .row')].map((r) =>
+    r.getAttribute('data-port'),
+  );
+  assert.deepEqual(board, ['3000'], 'hidden entries leave the main board');
+
+  assert.equal(document.getElementById('curated-drawer')?.hasAttribute('hidden'), false);
+  assert.equal(document.getElementById('count-curated')?.textContent, '1');
+  assert.equal(
+    document.querySelector('#curated-board .curate')?.textContent,
+    '+',
+    'the control offers to restore rather than hide again',
+  );
+});
+
+test('the curate button is a sibling of the link, never nested inside it', async () => {
+  const { document } = await boot([server(3000, 200)]);
+
+  // A <button> inside an <a> is invalid and swallows the link's own clicks.
+  assert.equal(document.querySelector('#board a.row button'), null);
+  assert.ok(document.querySelector('#board .row-wrap > .curate'));
 });
 
 test('non-HTTP listeners go to their own drawer and are not links', async () => {

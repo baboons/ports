@@ -1,6 +1,6 @@
 {
   "name": "@baboons/ports",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Scan localhost for running HTTP/HTTPS servers and browse them in a live dashboard",
   "type": "module",
   "bin": {

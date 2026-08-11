@@ -4,8 +4,15 @@
 const state = {
   /** port -> record */
   records: new Map(),
-  /** Which status buckets are visible. 4xx/5xx start hidden. */
-  show: { ok: true, err: false },
+  /**
+   * Which buckets are visible.
+   *
+   * 4xx/5xx start hidden everywhere. Loopback-only services start hidden only
+   * when the board is being viewed from another machine, because there they
+   * are genuinely unreachable - locally they are almost everything, and
+   * hiding them would empty the board.
+   */
+  show: { ok: true, err: false, local: true },
   /** 'list' is the dense board; 'grid' shows page thumbnails. */
   view: 'list',
   progress: null,
@@ -15,6 +22,9 @@ const el = {
   board: document.getElementById('board'),
   tcpBoard: document.getElementById('tcp-board'),
   historyBoard: document.getElementById('history-board'),
+  curatedBoard: document.getElementById('curated-board'),
+  curatedDrawer: document.getElementById('curated-drawer'),
+  countCurated: document.getElementById('count-curated'),
   tcpDrawer: document.getElementById('tcp-drawer'),
   historyDrawer: document.getElementById('history-drawer'),
   empty: document.getElementById('empty'),
@@ -22,6 +32,8 @@ const el = {
   hiddenText: document.getElementById('hidden-text'),
   countOk: document.getElementById('count-ok'),
   countErr: document.getElementById('count-err'),
+  countLocal: document.getElementById('count-local'),
+  filterLocal: document.getElementById('filter-local'),
   countTcp: document.getElementById('count-tcp'),
   countDead: document.getElementById('count-dead'),
   lamp: document.getElementById('lamp'),
@@ -44,6 +56,9 @@ function loadPrefs() {
     if (saved && typeof saved.show === 'object') {
       state.show.ok = saved.show.ok !== false;
       state.show.err = saved.show.err === true;
+      // localStorage is per-origin, so a choice made on nas.local does not
+      // leak into the localhost view or vice versa.
+      if (typeof saved.show.local === 'boolean') state.show.local = saved.show.local;
     }
     if (saved && typeof saved.theme === 'string') {
       document.documentElement.dataset.theme = saved.theme;
@@ -71,6 +86,9 @@ function applyQueryOverrides() {
 
   const ok = params.get('ok');
   if (ok !== null) state.show.ok = ok !== '0' && ok !== 'false';
+
+  const local = params.get('local');
+  if (local !== null) state.show.local = local !== '0' && local !== 'false';
 }
 
 function savePrefs() {
@@ -104,7 +122,13 @@ function bucket(record) {
 /** The filter the user actually toggles: healthy versus everything wrong. */
 const isErrorBucket = (b) => b === 'warn' || b === 'err';
 
+/** Unreachable from where we are standing, and therefore filterable. */
+function isUnreachable(record) {
+  return viewingRemotely() && isLoopbackOnly(record);
+}
+
 function passesFilter(record) {
+  if (isUnreachable(record) && !state.show.local) return false;
   const b = bucket(record);
   return isErrorBucket(b) ? state.show.err : state.show.ok;
 }
@@ -123,11 +147,41 @@ function monogram(record) {
   return /[A-Z0-9]/.test(letter) ? letter : '·';
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost', '0.0.0.0']);
+
+/**
+ * Link to a service through whatever host the dashboard itself was reached on.
+ *
+ * The scanner always probes over loopback, so `probedAddress` is 127.0.0.1 even
+ * when the board is served on 0.0.0.0 and opened from another machine. Using it
+ * for links would send every click to the *viewer's* own loopback. Deriving the
+ * host from the current page keeps links correct on localhost, a LAN IP, a
+ * hostname, or through a tunnel, without the server needing to know its name.
+ */
 function urlFor(record) {
-  const host = record.probedAddress.includes(':')
-    ? `[${record.probedAddress}]`
-    : record.probedAddress;
-  return `${record.protocol === 'https' ? 'https' : 'http'}://${host}:${record.port}/`;
+  const scheme = record.protocol === 'https' ? 'https' : 'http';
+  let host = window.location.hostname || record.probedAddress;
+  // IPv6 literals have to stay bracketed inside a URL.
+  if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`;
+  return `${scheme}://${host}:${record.port}/`;
+}
+
+/** Are we looking at this board from somewhere other than the host itself? */
+function viewingRemotely() {
+  const host = window.location.hostname;
+  return !!host && !LOOPBACK_HOSTS.has(host) && !host.endsWith('.localhost');
+}
+
+/**
+ * A service bound only to loopback is unreachable from another machine, so its
+ * link cannot work for a remote viewer however we build it. Worth saying out
+ * loud rather than handing over a link that just times out.
+ */
+function isLoopbackOnly(record) {
+  return (
+    record.addresses.length > 0 &&
+    record.addresses.every((address) => LOOPBACK_HOSTS.has(address) && address !== '0.0.0.0')
+  );
 }
 
 function descriptionFor(record) {
@@ -136,6 +190,34 @@ function descriptionFor(record) {
   if (record.error) return record.error;
   if (record.process?.cwd) return record.process.cwd.replace(/^\/Users\/[^/]+/, '~');
   return '';
+}
+
+/**
+ * A row plus its curation control.
+ *
+ * The control has to be a sibling of the anchor, not a child: a button nested
+ * inside an <a> is invalid HTML and swallows the link's own clicks.
+ */
+function buildEntry(record, view = 'list') {
+  const wrap = document.createElement('div');
+  wrap.className = 'row-wrap';
+  wrap.dataset.port = String(record.port);
+  wrap.append(buildRow(record, view));
+
+  const button = document.createElement('button');
+  button.className = 'curate';
+  const hidden = record.hidden === true;
+  button.title = hidden ? 'Show this again' : 'Hide this from the board';
+  button.setAttribute('aria-label', button.title);
+  button.textContent = hidden ? '+' : '×';
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setHidden(record.port, !hidden);
+  });
+  wrap.append(button);
+
+  return wrap;
 }
 
 function buildRow(record, view = 'list') {
@@ -230,6 +312,10 @@ function buildRow(record, view = 'list') {
   if (record.tls) addTag(record.tls.selfSigned ? 'self-signed' : 'TLS', 'tls');
   addTag(record.process?.name && !record.process?.projectName ? record.process.name : '');
   if (record.isSelf) addTag('this app', 'fw');
+  // Only meaningful when the board is being viewed from another machine.
+  if (web && record.alive && viewingRemotely() && isLoopbackOnly(record)) {
+    addTag('loopback only', 'warn');
+  }
   if (tags.childElementCount > 0) meta.append(tags);
 
   body.append(meta);
@@ -306,6 +392,18 @@ function placeholderThumb(record) {
   return div;
 }
 
+/** Transient message strip, for things the user should not have to guess. */
+function notify(message) {
+  const bar = document.getElementById('notice');
+  if (!bar) return;
+  bar.textContent = message;
+  bar.hidden = false;
+  clearTimeout(notify.timer);
+  notify.timer = setTimeout(() => {
+    bar.hidden = true;
+  }, 6000);
+}
+
 let renderQueued = false;
 function scheduleRender() {
   if (renderQueued) return;
@@ -319,32 +417,48 @@ function scheduleRender() {
 function render() {
   const all = [...state.records.values()].sort((a, b) => a.port - b.port);
 
-  const live = all.filter((r) => r.alive);
+  // Curated-away entries leave the main board entirely and collect in their
+  // own drawer, where they can be restored.
+  const curated = all.filter((r) => r.hidden === true);
+  const visible = all.filter((r) => r.hidden !== true);
+
+  const live = visible.filter((r) => r.alive);
   const web = live.filter(isWeb);
   const tcp = live.filter((r) => !isWeb(r));
-  const dead = all.filter((r) => !r.alive);
+  const dead = visible.filter((r) => !r.alive);
 
   const okCount = web.filter((r) => !isErrorBucket(bucket(r))).length;
   const errCount = web.filter((r) => isErrorBucket(bucket(r))).length;
+  const localCount = web.filter(isUnreachable).length;
 
   el.countOk.textContent = String(okCount);
   el.countErr.textContent = String(errCount);
+  el.countLocal.textContent = String(localCount);
+  // The chip is meaningless when nothing is unreachable, which is the normal
+  // case on the machine itself.
+  el.filterLocal.hidden = localCount === 0;
   el.countTcp.textContent = String(tcp.length);
   el.countDead.textContent = String(dead.length);
 
-  const visible = web.filter(passesFilter);
+  const shown = web.filter(passesFilter);
   // Only the main board switches to cards; the drawers stay compact lists.
   el.board.classList.toggle('as-grid', state.view === 'grid');
-  paint(el.board, visible, state.view);
-  el.empty.hidden = visible.length > 0;
+  paint(el.board, shown, state.view);
+  el.empty.hidden = shown.length > 0;
 
   // Most localhost 4xx/5xx endpoints are internal IPC helpers rather than
   // things you would open, so they are hidden by default — but a board that
   // quietly drops most of the machine looks broken. Always say what is hidden.
-  const hidden = web.length - visible.length;
+  const hidden = web.length - shown.length;
   el.hiddenBar.hidden = hidden === 0;
   if (hidden > 0) {
-    el.hiddenText.textContent = `${hidden} server${hidden === 1 ? '' : 's'} hidden — returning 4xx or 5xx`;
+    // Name the actual reasons; "hidden" alone reads like a bug.
+    const reasons = [];
+    if (!state.show.err && errCount > 0) reasons.push(`${errCount} returning 4xx or 5xx`);
+    if (!state.show.local && localCount > 0) {
+      reasons.push(`${localCount} bound to loopback, unreachable from here`);
+    }
+    el.hiddenText.textContent = `${hidden} server${hidden === 1 ? '' : 's'} hidden — ${reasons.join(', ')}`;
   }
 
   paint(el.tcpBoard, tcp);
@@ -352,6 +466,10 @@ function render() {
 
   paint(el.historyBoard, dead);
   el.historyDrawer.hidden = dead.length === 0;
+
+  paint(el.curatedBoard, curated);
+  el.curatedDrawer.hidden = curated.length === 0;
+  el.countCurated.textContent = String(curated.length);
 
   el.subtitle.textContent =
     web.length === 0
@@ -374,7 +492,7 @@ function paint(container, records, view = 'list') {
 
   records.forEach((record, i) => {
     const key = String(record.port);
-    const fresh = buildRow(record, view);
+    const fresh = buildEntry(record, view);
     const prev = existing.get(key);
 
     if (prev) {
@@ -528,12 +646,43 @@ function syncViewButtons() {
   }
 }
 
+/**
+ * Hide or restore a port.
+ *
+ * Optimistic: the row moves immediately and the server confirms over SSE. If
+ * the write fails the next snapshot puts it back, which is the right outcome
+ * for a preference that lives on disk.
+ */
+function setHidden(port, hidden) {
+  const record = state.records.get(port);
+  if (record) {
+    state.records.set(port, { ...record, hidden, hiddenBy: hidden ? 'port' : undefined });
+    scheduleRender();
+  }
+
+  fetch(`/api/${hidden ? 'hide' : 'unhide'}?port=${port}`, { method: 'POST' })
+    .then((res) => res.json())
+    .then((body) => {
+      // A range or command rule can outrank un-hiding a single port; the row
+      // staying put would otherwise look like the click did nothing.
+      if (!hidden && body?.stillHiddenBy) {
+        notify(`Port ${port} is still hidden by a ${body.stillHiddenBy} rule in curation.json`);
+      }
+    })
+    .catch(() => {});
+}
+
 /** Reveal the filtered-out servers, keeping the toggle in sync. */
 el.hiddenBar.addEventListener('click', () => {
+  // Reveal every category currently suppressing rows, not just errors.
   state.show.err = true;
-  const button = document.querySelector('.seg button[data-filter="err"]');
-  button.classList.add('on');
-  button.setAttribute('aria-pressed', 'true');
+  state.show.local = true;
+  for (const key of ['err', 'local']) {
+    const button = document.querySelector(`.seg button[data-filter="${key}"]`);
+    if (!button) continue;
+    button.classList.add('on');
+    button.setAttribute('aria-pressed', 'true');
+  }
   savePrefs();
   render();
 });
@@ -554,6 +703,9 @@ document.getElementById('theme').addEventListener('click', () => {
 
 // --- Boot ------------------------------------------------------------------
 
+// Establish the context-dependent default before prefs and query overrides,
+// both of which represent an explicit choice and should win.
+state.show.local = !viewingRemotely();
 loadPrefs();
 applyQueryOverrides();
 for (const button of document.querySelectorAll('.seg button[data-filter]')) {

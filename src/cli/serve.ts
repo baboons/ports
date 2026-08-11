@@ -143,6 +143,18 @@ export async function serve(args: ServeArgs): Promise<void> {
   const url = `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${address}/`;
 
   process.stdout.write(`\n  ${c.bold('ports')} ${c.dim('·')} ${c.cyan(url)}\n`);
+
+  // Say why thumbnails are missing instead of leaving blank placeholders and
+  // no explanation - this is the one thing a headless box gets wrong.
+  if (server.screenshotIssue) {
+    process.stdout.write(c.yellow(`  screenshots off: ${server.screenshotIssue}\n`));
+  }
+  if (config.host === '0.0.0.0') {
+    process.stdout.write(
+      c.dim('  reachable on this machine’s LAN address; links follow the host you browse from\n'),
+    );
+  }
+
   process.stdout.write(c.dim('  scanning in the background — Ctrl-C to stop\n\n'));
 
   if (config.open) openBrowser(url);

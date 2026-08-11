@@ -464,6 +464,11 @@ a.row:hover .port {
   border-color: color-mix(in oklab, var(--accent) 30%, var(--line));
 }
 
+.tag.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 35%, var(--line));
+}
+
 .tag.tls {
   color: var(--ok);
   border-color: color-mix(in oklab, var(--ok) 30%, var(--line));
@@ -574,6 +579,84 @@ a.row:hover .arrow {
   100% {
     background: transparent;
   }
+}
+
+/* --- Curation ----------------------------------------------- */
+
+/* The row and its control are siblings; the wrapper carries the hover state
+   so the button can sit over the row without being inside the anchor. */
+.row-wrap {
+  position: relative;
+}
+
+.curate {
+  position: absolute;
+  top: 50%;
+  right: -2px;
+  transform: translateY(-50%) scale(0.85);
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  appearance: none;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.16s ease, color 0.16s ease, border-color 0.16s ease,
+    transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+  z-index: 6;
+}
+
+.row-wrap:hover .curate,
+.curate:focus-visible {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+}
+
+.curate:hover {
+  color: var(--err);
+  border-color: color-mix(in oklab, var(--err) 50%, var(--line));
+}
+
+/* In the hidden drawer the control restores rather than removes. */
+#curated-board .curate {
+  opacity: 0.7;
+}
+
+#curated-board .curate:hover {
+  color: var(--ok);
+  border-color: color-mix(in oklab, var(--ok) 50%, var(--line));
+}
+
+.board.as-grid .curate {
+  top: 8px;
+  right: 8px;
+  transform: scale(0.85);
+  background: color-mix(in oklab, var(--ground) 82%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.board.as-grid .row-wrap:hover .curate {
+  transform: scale(1);
+}
+
+.board.as-grid .row-wrap {
+  display: block;
+}
+
+.notice {
+  max-width: 1180px;
+  margin: 6px auto 0;
+  padding: 8px clamp(16px, 4vw, 44px);
+  color: var(--warn);
+  font-size: 11px;
+  letter-spacing: 0.04em;
 }
 
 /* --- Drawers ------------------------------------------------ */
