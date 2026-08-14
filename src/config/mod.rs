@@ -1,3 +1,4 @@
+pub mod bindings;
 pub mod curation;
 
 use std::path::{Path, PathBuf};

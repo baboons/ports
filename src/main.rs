@@ -1,8 +1,3 @@
-mod cache;
-mod cli;
-mod config;
-mod scan;
-mod types;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,15 +5,15 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
-use crate::cache::{load_cache, save_cache, CacheState};
-use crate::cli::format::{dim, gray, render_table, TableOptions};
-use crate::config::curation::{
+use ports::cache::{load_cache, save_cache, CacheState};
+use ports::cli::format::{bold, dim, gray, render_table, TableOptions};
+use ports::config::curation::{
     curation_path, hide_reason_for, load_curation, save_curation, with_hidden, without_hidden,
 };
-use crate::scan::listeners::is_privileged;
-use crate::scan::scanner::{scan, ScanOptions};
-use crate::scan::scheduler::is_sweep_due;
-use crate::types::{now_ms, PortRecord, ScanProgress};
+use ports::scan::listeners::is_privileged;
+use ports::scan::scanner::{scan, ScanOptions};
+use ports::scan::scheduler::is_sweep_due;
+use ports::types::{now_ms, PortRecord, ScanProgress};
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +78,33 @@ enum Command {
 
     /// Show the current hide rules and where they live
     Hidden,
+
+    /// Bind a local domain to a port
+    ///
+    /// With one argument the name is inferred from the project running there.
+    #[command(after_help = "EXAMPLES:\n  ports bind myapp 4000\n  ports bind 4000\n  ports bind api.myapp 4001")]
+    Bind {
+        /// Subdomain, or the port when given alone
+        first: String,
+        /// Port, or host:port
+        second: Option<String>,
+    },
+
+    /// Remove a local domain binding
+    Unbind {
+        /// The subdomain to remove
+        name: String,
+    },
+
+    /// List bound domains and whether their upstreams are answering
+    Links,
+
+    /// Run the proxy in the foreground
+    Serve {
+        /// Port to serve HTTP on, overriding the saved setting
+        #[arg(long)]
+        http_port: Option<u16>,
+    },
 }
 
 #[tokio::main]
@@ -99,10 +121,20 @@ async fn main() {
         Some(Command::Hide { ports }) => curate(&ports, true),
         Some(Command::Unhide { ports }) => curate(&ports, false),
         Some(Command::Hidden) => show_hidden(),
+        Some(Command::Bind { first, second }) => {
+            // `ports bind 4000` infers the name; `ports bind myapp 4000` does not.
+            match second {
+                Some(target) => ports::cli::bind::bind(Some(first), target).await,
+                None => ports::cli::bind::bind(None, first).await,
+            }
+        }
+        Some(Command::Unbind { name }) => ports::cli::bind::unbind(name),
+        Some(Command::Links) => ports::cli::bind::links().await,
+        Some(Command::Serve { http_port }) => serve(http_port).await,
     };
 
     if let Err(err) = result {
-        eprintln!("\n{} {err}", cli::format::red("ports failed:"));
+        eprintln!("\n{} {err}", ports::cli::format::red("ports failed:"));
         std::process::exit(1);
     }
 }
@@ -279,6 +311,51 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
     println!();
 
     Ok(())
+}
+
+/// Run the proxy in the foreground.
+async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
+    let mut bindings = ports::config::bindings::load_bindings_strict()?;
+    if let Some(port) = http_port_override {
+        bindings.http_port = port;
+    }
+
+    let http_port = bindings.http_port;
+    let tld = bindings.tld.clone();
+    let count = bindings.bindings.len();
+
+    let state = Arc::new(ports::proxy::ProxyState::new(bindings));
+    tokio::spawn(ports::proxy::watch_bindings(Arc::clone(&state)));
+
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", http_port)).await {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            anyhow::bail!(
+                "port {http_port} needs root. Either run `sudo ports serve`, or pick an \
+                 unprivileged port with `ports serve --http-port 8080`"
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            let holder = ports::scan::listeners::enumerate_listeners()
+                .into_iter()
+                .find(|l| l.port == http_port)
+                .and_then(|l| l.command)
+                .unwrap_or_else(|| "another process".into());
+            anyhow::bail!("port {http_port} is already held by {holder}");
+        }
+        Err(err) => return Err(err.into()),
+    };
+    drop(listener);
+
+    println!(
+        "\n  {} on port {http_port}, serving {count} binding{} under {}",
+        bold("ports proxy"),
+        if count == 1 { "" } else { "s" },
+        bold(&format!("*.{tld}"))
+    );
+    println!("{}\n", dim("  Ctrl-C to stop"));
+
+    ports::proxy::serve_http(state, http_port).await
 }
 
 fn curate(ports: &[u16], hide: bool) -> anyhow::Result<()> {

@@ -11,6 +11,10 @@ homepage = "https://github.com/baboons/ports#readme"
 keywords = ["ports", "localhost", "proxy", "dev-server", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "ports"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ports"
 path = "src/main.rs"
