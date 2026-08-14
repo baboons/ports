@@ -6,6 +6,7 @@
 //! upgrade completing, a stream arriving unbuffered. Both are things a naive
 //! proxy breaks silently.
 
+pub mod adopt;
 pub mod cache;
 pub mod cli;
 pub mod config;

@@ -90,6 +90,27 @@ enum Command {
         second: Option<String>,
     },
 
+    /// Bind every server in the current project
+    ///
+    /// Finds the repo's workspaces, matches running servers to them by working
+    /// directory, and falls back to declared config for anything not up yet.
+    Adopt {
+        /// Project directory (defaults to the current one)
+        path: Option<std::path::PathBuf>,
+
+        /// Show what would be bound, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Bind without confirming
+        #[arg(short, long)]
+        yes: bool,
+
+        /// Qualify every name with the repo, e.g. web.acme.localhost
+        #[arg(long)]
+        prefix: bool,
+    },
+
     /// Remove a local domain binding
     Unbind {
         /// The subdomain to remove
@@ -127,6 +148,20 @@ async fn main() {
                 Some(target) => ports::cli::bind::bind(Some(first), target).await,
                 None => ports::cli::bind::bind(None, first).await,
             }
+        }
+        Some(Command::Adopt {
+            path,
+            dry_run,
+            yes,
+            prefix,
+        }) => {
+            ports::adopt::adopt(ports::adopt::AdoptArgs {
+                path,
+                dry_run,
+                yes,
+                prefix,
+            })
+            .await
         }
         Some(Command::Unbind { name }) => ports::cli::bind::unbind(name),
         Some(Command::Links) => ports::cli::bind::links().await,
