@@ -89,10 +89,26 @@ fn is_upgrade(req: &Request<Incoming>) -> bool {
         .unwrap_or(false)
 }
 
-/// Serve plain HTTP on `port`.
-pub async fn serve_http(state: Arc<ProxyState>, port: u16) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+/// Claim a port.
+///
+/// Separate from serving so a privileged port can be bound while we still have
+/// the rights to, and the rights given up before a single request is handled.
+pub async fn bind_listener(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await
+}
 
+/// Bind and serve. Used by tests; the daemon binds separately.
+pub async fn serve_http(state: Arc<ProxyState>, port: u16) -> anyhow::Result<()> {
+    let listener = bind_listener(port).await?;
+    serve_on(listener, state, port).await
+}
+
+/// Serve plain HTTP on an already-bound listener.
+pub async fn serve_on(
+    listener: TcpListener,
+    state: Arc<ProxyState>,
+    port: u16,
+) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,

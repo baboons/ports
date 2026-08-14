@@ -10,6 +10,7 @@ pub mod adopt;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod dns;
 pub mod proxy;
 pub mod scan;
 pub mod types;

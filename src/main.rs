@@ -126,6 +126,50 @@ enum Command {
         #[arg(long)]
         http_port: Option<u16>,
     },
+
+    /// Show or change the local top-level domain
+    ///
+    /// Defaults to .localhost, which every resolver already sends to loopback.
+    /// Any other TLD needs a one-time resolver entry, which --install writes.
+    Domain {
+        /// The new TLD, e.g. `test`. Omit to show the current one.
+        tld: Option<String>,
+
+        /// Write the resolver entry (needs root)
+        #[arg(long)]
+        install: bool,
+    },
+
+    /// Install, remove or inspect the proxy service
+    Service {
+        #[arg(value_enum, default_value = "status")]
+        action: ServiceActionArg,
+
+        /// Install for the current user rather than system-wide
+        #[arg(long)]
+        user: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum ServiceActionArg {
+    Install,
+    Uninstall,
+    Status,
+    /// Print the unit file without installing anything
+    Print,
+}
+
+impl From<ServiceActionArg> for ports::cli::service::ServiceAction {
+    fn from(value: ServiceActionArg) -> Self {
+        use ports::cli::service::ServiceAction;
+        match value {
+            ServiceActionArg::Install => ServiceAction::Install,
+            ServiceActionArg::Uninstall => ServiceAction::Uninstall,
+            ServiceActionArg::Status => ServiceAction::Status,
+            ServiceActionArg::Print => ServiceAction::Print,
+        }
+    }
 }
 
 #[tokio::main]
@@ -166,6 +210,22 @@ async fn main() {
         Some(Command::Unbind { name }) => ports::cli::bind::unbind(name),
         Some(Command::Links) => ports::cli::bind::links().await,
         Some(Command::Serve { http_port }) => serve(http_port).await,
+        Some(Command::Domain { tld, install }) => {
+            if install {
+                let tld = tld.unwrap_or_else(|| {
+                    ports::config::bindings::load_bindings().tld
+                });
+                ports::cli::domain::install_resolver(&tld)
+            } else {
+                ports::cli::domain::domain(tld)
+            }
+        }
+        Some(Command::Service { action, user }) => {
+            ports::cli::service::service(ports::cli::service::ServiceArgs {
+                action: action.into(),
+                user,
+            })
+        }
     };
 
     if let Err(err) = result {
@@ -359,14 +419,15 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     let tld = bindings.tld.clone();
     let count = bindings.bindings.len();
 
-    let state = Arc::new(ports::proxy::ProxyState::new(bindings));
-    tokio::spawn(ports::proxy::watch_bindings(Arc::clone(&state)));
+    let needs_dns = ports::dns::resolver::mechanism_for(&tld)
+        != ports::dns::resolver::Mechanism::None;
 
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", http_port)).await {
+    // Claim the ports first, while we may still have the rights to.
+    let listener = match ports::proxy::bind_listener(http_port).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
             anyhow::bail!(
-                "port {http_port} needs root. Either run `sudo ports serve`, or pick an \
+                "port {http_port} needs root. Either `sudo ports serve`, or pick an \
                  unprivileged port with `ports serve --http-port 8080`"
             );
         }
@@ -380,7 +441,26 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         }
         Err(err) => return Err(err.into()),
     };
-    drop(listener);
+
+    let dns_socket = if needs_dns {
+        Some(tokio::net::UdpSocket::bind(("127.0.0.1", ports::dns::DNS_PORT)).await?)
+    } else {
+        None
+    };
+
+    // Everything privileged is done. Give root back before handling a single
+    // request, so a bug in the proxy is a bug in an ordinary user process.
+    ports::cli::service::drop_privileges()?;
+
+    let state = Arc::new(ports::proxy::ProxyState::new(bindings));
+    tokio::spawn(ports::proxy::watch_bindings(Arc::clone(&state)));
+
+    if let Some(socket) = dns_socket {
+        let tld_handle = Arc::new(tokio::sync::RwLock::new(tld.clone()));
+        tokio::spawn(async move {
+            let _ = ports::dns::serve_on(socket, tld_handle).await;
+        });
+    }
 
     println!(
         "\n  {} on port {http_port}, serving {count} binding{} under {}",
@@ -388,9 +468,15 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         if count == 1 { "" } else { "s" },
         bold(&format!("*.{tld}"))
     );
+    if needs_dns {
+        println!(
+            "{}",
+            dim(&format!("  dns responder on 127.0.0.1:{}", ports::dns::DNS_PORT))
+        );
+    }
     println!("{}\n", dim("  Ctrl-C to stop"));
 
-    ports::proxy::serve_http(state, http_port).await
+    ports::proxy::serve_on(listener, state, http_port).await
 }
 
 fn curate(ports: &[u16], hide: bool) -> anyhow::Result<()> {
