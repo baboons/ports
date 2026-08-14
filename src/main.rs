@@ -126,6 +126,14 @@ enum Command {
         /// Port to serve HTTP on, overriding the saved setting
         #[arg(long)]
         http_port: Option<u16>,
+
+        /// Port to serve HTTPS on, overriding the saved setting
+        #[arg(long)]
+        https_port: Option<u16>,
+
+        /// Do not serve HTTPS at all
+        #[arg(long, conflicts_with = "https_port")]
+        no_https: bool,
     },
 
     /// Show or change the local top-level domain
@@ -227,7 +235,11 @@ async fn main() {
         }
         Some(Command::Unbind { name }) => ports::cli::bind::unbind(name),
         Some(Command::Links) => ports::cli::bind::links().await,
-        Some(Command::Serve { http_port }) => serve(http_port).await,
+        Some(Command::Serve {
+            http_port,
+            https_port,
+            no_https,
+        }) => serve(http_port, https_port, no_https).await,
         Some(Command::Domain { tld, install }) => {
             if install {
                 let tld = tld.unwrap_or_else(|| ports::config::bindings::load_bindings().tld);
@@ -315,6 +327,7 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
             force: args.refresh,
             prior: cache.records.clone(),
             self_port: None,
+            fetch_favicons: false,
             cancel: Arc::clone(&cancel),
         },
         |progress| {
@@ -511,10 +524,19 @@ fn ca(action: CaActionArg) -> anyhow::Result<()> {
 }
 
 /// Run the proxy in the foreground.
-async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
+async fn serve(
+    http_port_override: Option<u16>,
+    https_port_override: Option<u16>,
+    no_https: bool,
+) -> anyhow::Result<()> {
     let mut bindings = ports::config::bindings::load_bindings_strict()?;
     if let Some(port) = http_port_override {
         bindings.http_port = port;
+    }
+    if no_https {
+        bindings.https_port = None;
+    } else if let Some(port) = https_port_override {
+        bindings.https_port = Some(port);
     }
 
     let http_port = bindings.http_port;
@@ -549,8 +571,32 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     // is worse than no HTTPS, because the failure is an interstitial rather
     // than a clean fallback.
     let ca = ports::proxy::tls::find_ca();
+    let mut https_note: Option<String> = None;
     let https = match (https_port, &ca) {
-        (Some(port), Some(_)) => Some((port, ports::proxy::bind_listener(port).await?)),
+        (Some(port), Some(_)) => match ports::proxy::bind_listener(port).await {
+            Ok(listener) => Some((port, listener)),
+            // Losing TLS is a degradation; losing the proxy is an outage. Say
+            // what happened and carry on serving HTTP, which is the half
+            // everything actually depends on.
+            Err(err) => {
+                https_note = Some(match err.kind() {
+                    std::io::ErrorKind::PermissionDenied => format!(
+                        "https off: port {port} needs root — `sudo ports serve`, \
+                         or set httpsPort above 1024"
+                    ),
+                    std::io::ErrorKind::AddrInUse => {
+                        format!("https off: port {port} is already in use")
+                    }
+                    _ => format!("https off: could not bind port {port}: {err}"),
+                });
+                None
+            }
+        },
+        (Some(_), None) => {
+            https_note =
+                Some("https off: no local CA — install mkcert, or run `ports ca install`".into());
+            None
+        }
         _ => None,
     };
 
@@ -566,6 +612,8 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
 
     let state = Arc::new(ports::proxy::ProxyState::new(bindings));
     tokio::spawn(ports::proxy::watch_bindings(Arc::clone(&state)));
+    // Populates the index with what is running, and caches their icons.
+    tokio::spawn(ports::proxy::watch_ports(Arc::clone(&state)));
 
     if let Some(socket) = dns_socket {
         let tld_handle = Arc::new(tokio::sync::RwLock::new(tld.clone()));
@@ -574,7 +622,9 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
+    let mut https_listening: Option<(u16, String)> = None;
     if let (Some((port, listener)), Some(ca)) = (https, ca) {
+        https_listening = Some((port, ca.source.display().to_string()));
         let certs = Arc::new(ports::proxy::tls::CertStore::new(ca));
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -588,20 +638,13 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         if count == 1 { "" } else { "s" },
         bold(&format!("*.{tld}"))
     );
-    if let Some(port) = https_port {
-        match ports::proxy::tls::find_ca() {
-            Some(found) => println!(
-                "{}",
-                dim(&format!(
-                    "  https on port {port}, issuing from {}",
-                    found.source.display()
-                ))
-            ),
-            None => println!(
-                "{}",
-                gray("  https off: no local CA — install mkcert, or run `ports ca install`")
-            ),
-        }
+    match (&https_note, https_listening) {
+        (Some(note), _) => println!("{}", gray(&format!("  {note}"))),
+        (None, Some((port, source))) => println!(
+            "{}",
+            dim(&format!("  https on port {port}, issuing from {source}"))
+        ),
+        _ => {}
     }
     if needs_dns {
         println!(
@@ -612,6 +655,18 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
             ))
         );
     }
+    let index_suffix = if http_port == 80 {
+        String::new()
+    } else {
+        format!(":{http_port}")
+    };
+    println!(
+        "{}",
+        dim(&format!(
+            "  index at http://{}.{tld}{index_suffix}/",
+            ports::proxy::index::INDEX_NAME
+        ))
+    );
     println!("{}\n", dim("  Ctrl-C to stop"));
 
     ports::proxy::serve_on(listener, state, http_port).await

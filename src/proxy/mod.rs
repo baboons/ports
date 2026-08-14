@@ -1,6 +1,7 @@
 //! The reverse proxy: `myapp.localhost` in, `127.0.0.1:4000` out.
 
 pub mod blocked;
+pub mod index;
 pub mod rewrite;
 pub mod tls;
 
@@ -37,16 +38,91 @@ fn empty() -> ProxyBody {
         .boxed()
 }
 
-/// Shared, hot-reloadable configuration.
+/// Shared, hot-reloadable state.
 pub struct ProxyState {
     pub bindings: RwLock<Bindings>,
+    /// What the background scan last saw, for the index page.
+    pub records: RwLock<Vec<crate::types::PortRecord>>,
 }
 
 impl ProxyState {
     pub fn new(bindings: Bindings) -> Self {
         Self {
             bindings: RwLock::new(bindings),
+            records: RwLock::new(Vec::new()),
         }
+    }
+}
+
+/// Keep a picture of what is running, for the index page to show.
+///
+/// Deliberately the same cache the CLI reads and writes, so a `ports` run in a
+/// terminal and the daemon do not each pay for their own sweep.
+pub async fn watch_ports(state: Arc<ProxyState>) {
+    use crate::cache::{load_cache, save_cache, CacheState};
+    use crate::scan::scanner::{scan, ScanOptions};
+    use crate::scan::scheduler::is_sweep_due;
+    use crate::types::now_ms;
+
+    // Seed from whatever the last CLI run left behind, so the index has
+    // something to show before the first scan finishes.
+    let cached = load_cache();
+    *state.records.write().await = cached.records.clone();
+    let mut last_full_sweep = cached.last_full_sweep;
+
+    loop {
+        let prior = state.records.read().await.clone();
+        let self_port = state.bindings.read().await.http_port;
+
+        // The full sweep is the expensive tier; run it only when its TTL says
+        // so, exactly as the CLI does.
+        let deep = is_sweep_due(last_full_sweep, now_ms());
+
+        let result = scan(
+            ScanOptions {
+                deep,
+                prior: prior.clone(),
+                self_port: Some(self_port),
+                fetch_favicons: true,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+
+        if result.swept_fully {
+            last_full_sweep = now_ms();
+        }
+
+        // Ports this pass did not look at keep their last known state: a
+        // skipped sweep must make the answer cheaper, never smaller.
+        let observed: std::collections::HashSet<u16> =
+            result.records.iter().map(|r| r.port).collect();
+        let mut merged: Vec<crate::types::PortRecord> = prior
+            .into_iter()
+            .filter(|r| !observed.contains(&r.port))
+            .map(|r| crate::types::PortRecord { stale: true, ..r })
+            .chain(result.records)
+            .collect();
+        merged.sort_by_key(|r| r.port);
+
+        save_cache(&CacheState {
+            last_full_sweep,
+            records: merged.clone(),
+            ..Default::default()
+        });
+
+        let live: std::collections::HashSet<String> = merged
+            .iter()
+            .filter_map(|r| r.meta.as_ref()?.favicon_hash.clone())
+            .collect();
+        crate::cache::favicons::prune(&live);
+
+        *state.records.write().await = merged;
+
+        // Long enough to be invisible on a dev machine's load, short enough
+        // that a server started a minute ago is on the index.
+        tokio::time::sleep(Duration::from_secs(20)).await;
     }
 }
 
@@ -196,12 +272,26 @@ async fn handle(
         .to_string();
 
     let bindings = state.bindings.read().await;
-    let Some(binding) = bindings.resolve(&host_header) else {
-        return Ok(unknown_host_page(&bindings, &host_header));
-    };
-    let upstream = binding.target.clone();
+    let is_index = index::is_index_host(&host_header, &bindings.tld);
+    let resolved = bindings.resolve(&host_header).map(|b| b.target.clone());
     let tld = bindings.tld.clone();
     drop(bindings);
+
+    // The index owns its own routes wherever it is served, which is the
+    // reserved name and every hostname nothing is bound to.
+    let path = req.uri().path().to_string();
+    if path.starts_with("/_ports/") && (is_index || resolved.is_none()) {
+        return Ok(serve_index_route(req, &state, &path, scheme, listen_port).await);
+    }
+
+    let Some(upstream) = resolved else {
+        return Ok(index_page(&state, &host_header, is_index).await);
+    };
+    if is_index {
+        // Someone bound over the reserved name; the index still wins, or there
+        // would be no way back to it.
+        return Ok(index_page(&state, &host_header, true).await);
+    }
 
     // The origin as the browser knows it, for rewriting redirects back.
     let public_host = host_header
@@ -373,34 +463,186 @@ fn page(status: StatusCode, title: &str, body: String) -> Response<ProxyBody> {
 /// Header the proxy stamps on pages it generates itself.
 pub const SELF_MARKER: &str = "x-ports-proxy";
 
-/// Nothing is bound to this hostname — say what is.
-fn unknown_host_page(bindings: &Bindings, host: &str) -> Response<ProxyBody> {
-    let host = html_escape(host.split(':').next().unwrap_or(host));
+/// The index: what is bound, what is running, and one click between them.
+async fn index_page(state: &Arc<ProxyState>, host: &str, canonical: bool) -> Response<ProxyBody> {
+    let bindings = state.bindings.read().await;
+    let records = state.records.read().await;
+    let snapshot = index::snapshot(&bindings, &records);
 
-    let list = if bindings.bindings.is_empty() {
-        "<p>Nothing is bound yet. Try <code>ports adopt</code> in a project, \
-         or <code>ports bind myapp 3000</code>.</p>"
-            .to_string()
-    } else {
-        let items: String = bindings
-            .bindings
-            .iter()
-            .map(|b| {
-                let hostname = html_escape(&b.hostname(&bindings.tld));
-                format!(
-                    "<li><a href=\"http://{hostname}/\">{hostname}</a> → <code>{}</code></li>",
-                    html_escape(&b.target)
-                )
-            })
-            .collect();
-        format!("<p>Bound right now:</p><ul>{items}</ul>")
+    // Arriving at a name nothing is bound to is not an error worth a 404 in
+    // the console, but it is worth saying which name you asked for.
+    let missing = (!canonical).then(|| host.split(':').next().unwrap_or(host));
+    let html = index::render(&snapshot, missing);
+
+    Response::builder()
+        .status(if canonical {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        })
+        .header("content-type", "text/html; charset=utf-8")
+        .header(SELF_MARKER, "1")
+        .body(full(html))
+        .expect("static response builds")
+}
+
+/// Does this request come from the page we served, rather than another site?
+///
+/// Any page in the browser can POST to localhost, so a state-changing request
+/// needs proof of origin. `Origin` must match the request's own origin exactly;
+/// absent is refused too, since a same-origin `fetch` always sends it.
+fn origin_is_self(
+    req: &Request<Incoming>,
+    host_header: &str,
+    scheme: &str,
+    listen_port: u16,
+) -> bool {
+    let Some(origin) = req
+        .headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
     };
 
-    page(
-        StatusCode::NOT_FOUND,
-        "Not bound",
-        format!("<h1>Nothing is bound to {host}</h1>{list}"),
-    )
+    let host = host_header.split(':').next().unwrap_or(host_header);
+    let default_port =
+        (scheme == "http" && listen_port == 80) || (scheme == "https" && listen_port == 443);
+
+    let expected = if default_port {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{listen_port}")
+    };
+
+    origin.eq_ignore_ascii_case(&expected)
+}
+
+fn json(status: StatusCode, body: &serde_json::Value) -> Response<ProxyBody> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .header(SELF_MARKER, "1")
+        .body(full(body.to_string()))
+        .expect("static response builds")
+}
+
+/// The index's own endpoints: data, icons, and the two mutations.
+async fn serve_index_route(
+    req: Request<Incoming>,
+    state: &Arc<ProxyState>,
+    path: &str,
+    scheme: &'static str,
+    listen_port: u16,
+) -> Response<ProxyBody> {
+    use crate::cache::favicons::read_favicon;
+
+    if let Some(hash) = path.strip_prefix("/_ports/favicon/") {
+        return match read_favicon(hash) {
+            Some(icon) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", icon.content_type)
+                // Content-addressed, so it can never go stale.
+                .header("cache-control", "public, max-age=31536000, immutable")
+                .body(full(icon.bytes))
+                .expect("static response builds"),
+            None => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(empty())
+                .expect("static response builds"),
+        };
+    }
+
+    if path == "/_ports/data" {
+        let bindings = state.bindings.read().await;
+        let records = state.records.read().await;
+        let snapshot = index::snapshot(&bindings, &records);
+        return json(
+            StatusCode::OK,
+            &serde_json::to_value(&snapshot).unwrap_or_default(),
+        );
+    }
+
+    let mutation = matches!(path, "/_ports/bind" | "/_ports/unbind");
+    if !mutation {
+        return json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "no such endpoint" }),
+        );
+    }
+
+    if req.method() != hyper::Method::POST {
+        return json(
+            StatusCode::METHOD_NOT_ALLOWED,
+            &serde_json::json!({ "error": "POST only" }),
+        );
+    }
+
+    let host_header = req
+        .headers()
+        .get(HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    if !origin_is_self(&req, &host_header, scheme, listen_port) {
+        return json(
+            StatusCode::FORBIDDEN,
+            &serde_json::json!({ "error": "cross-origin requests are refused" }),
+        );
+    }
+
+    // A JSON content-type forces a CORS preflight, which a page from another
+    // origin cannot satisfy. Belt to the Origin check's braces.
+    let is_json = req
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("application/json"))
+        .unwrap_or(false);
+    if !is_json {
+        return json(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &serde_json::json!({ "error": "expected application/json" }),
+        );
+    }
+
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": "unreadable body" }),
+            )
+        }
+    };
+
+    let mut bindings = state.bindings.write().await;
+    let outcome = if path == "/_ports/bind" {
+        serde_json::from_slice::<index::BindRequest>(&body)
+            .map_err(|err| err.to_string())
+            .and_then(|request| index::apply_bind(&mut bindings, &request))
+    } else {
+        serde_json::from_slice::<index::UnbindRequest>(&body)
+            .map_err(|err| err.to_string())
+            .and_then(|request| index::apply_unbind(&mut bindings, &request))
+    };
+
+    match outcome {
+        Ok(name) => {
+            if let Err(err) = crate::config::bindings::save_bindings(&bindings) {
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": err.to_string() }),
+                );
+            }
+            json(StatusCode::OK, &serde_json::json!({ "ok": name }))
+        }
+        Err(error) => json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": error }),
+        ),
+    }
 }
 
 /// The binding exists but the port behind it is not answering.
@@ -450,18 +692,21 @@ mod tests {
         assert_eq!(escaped, "&lt;script&gt;alert(1)&lt;/script&gt;");
     }
 
-    #[test]
-    fn the_unknown_host_page_lists_what_is_bound() {
+    #[tokio::test]
+    async fn an_unbound_hostname_gets_the_index_and_a_404() {
         let mut bindings = Bindings::default();
         bindings.upsert("myapp".into(), "127.0.0.1:4000".into(), 0);
+        let state = Arc::new(ProxyState::new(bindings));
 
-        let response = unknown_host_page(&bindings, "nope.localhost");
+        let response = index_page(&state, "nope.localhost", false).await;
+        // The index, but still a 404: nothing is bound to what was asked for.
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    #[test]
-    fn an_empty_table_suggests_how_to_fill_it() {
-        let response = unknown_host_page(&Bindings::default(), "nope.localhost");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    #[tokio::test]
+    async fn the_reserved_name_gets_the_index_and_a_200() {
+        let state = Arc::new(ProxyState::new(Bindings::default()));
+        let response = index_page(&state, "ports.localhost", true).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

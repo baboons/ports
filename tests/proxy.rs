@@ -319,3 +319,233 @@ async fn completes_a_websocket_upgrade_and_pipes_both_directions() {
 
     assert_eq!(&echoed, b"ping-through-the-tunnel");
 }
+
+// --- The index page and its endpoints ---------------------------------------
+
+/// Send a request with arbitrary headers and return the raw response.
+async fn raw(proxy_port: u16, request: &str) -> String {
+    let mut socket = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+    socket.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response)).await;
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn post(host: &str, path: &str, origin: Option<&str>, content_type: &str, body: &str) -> String {
+    let origin_header = match origin {
+        Some(origin) => format!("Origin: {origin}\r\n"),
+        None => String::new(),
+    };
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\n{origin_header}\
+         Content-Type: {content_type}\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn the_reserved_name_serves_the_index() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let response = request(proxy, "ports.localhost", "/").await;
+
+    assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
+    assert!(response.contains("text/html"));
+    // It should name what is bound.
+    assert!(response.contains("myapp"));
+}
+
+#[tokio::test]
+async fn the_index_page_fetches_nothing_from_the_internet() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let response = request(proxy, "ports.localhost", "/").await;
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or_default();
+
+    // Links to local servers are the whole point; what would break a dashboard
+    // used offline is loading assets from elsewhere.
+    assert!(
+        !body.contains("<script src") && !body.contains("<script  src"),
+        "index should inline its script"
+    );
+    assert!(
+        !body.contains("rel=stylesheet") && !body.contains("rel=\"stylesheet\""),
+        "index should inline its styles"
+    );
+    assert!(!body.contains("@import"), "index should not import styles");
+
+    // Every absolute URL on the page must point at this machine.
+    for (index, _) in body.match_indices("://") {
+        let rest = &body[index + 3..];
+        let host: String = rest
+            .chars()
+            .take_while(|c| !matches!(c, '/' | '"' | '\'' | ' ' | '<' | ')'))
+            .collect();
+        let bare = host.split(':').next().unwrap_or(&host);
+        assert!(
+            bare == "localhost" || bare.ends_with(".localhost") || bare == "127.0.0.1",
+            "index references {bare:?}, which is not on this machine"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_data_endpoint_returns_json() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let response = request(proxy, "ports.localhost", "/_ports/data").await;
+
+    assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
+    assert!(response.contains("application/json"));
+    assert!(response.contains("\"bound\""));
+}
+
+#[tokio::test]
+async fn a_cross_origin_post_is_refused() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+
+    // The attack this guards against: any page you visit can POST to
+    // localhost. Without the check, evil.com could rebind your domains.
+    let response = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some("https://evil.example"),
+            "application/json",
+            r#"{"name":"pwned","target":"4000"}"#,
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 403"), "got: {response}");
+    assert!(response.contains("cross-origin"));
+}
+
+#[tokio::test]
+async fn a_post_with_no_origin_at_all_is_refused() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+
+    // A same-origin fetch always sends Origin, so its absence on a
+    // state-changing request means something else sent it.
+    let response = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            None,
+            "application/json",
+            r#"{"name":"pwned","target":"4000"}"#,
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 403"), "got: {response}");
+}
+
+#[tokio::test]
+async fn a_form_encoded_post_is_refused_even_from_the_right_origin() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+
+    // Form encoding is a "simple request" that skips the CORS preflight, so
+    // requiring JSON is a second, independent barrier.
+    let response = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some(&format!("http://ports.localhost:{proxy}")),
+            "application/x-www-form-urlencoded",
+            "name=pwned&target=4000",
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 415"), "got: {response}");
+}
+
+#[tokio::test]
+async fn a_same_origin_post_binds_and_unbinds() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    let bound = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some(&origin),
+            "application/json",
+            r#"{"name":"fromtheindex","target":"4321"}"#,
+        ),
+    )
+    .await;
+    assert!(bound.starts_with("HTTP/1.1 200"), "got: {bound}");
+    assert!(bound.contains("fromtheindex.localhost"));
+
+    // It should now be routable, which is the whole point.
+    let listed = request(proxy, "ports.localhost", "/_ports/data").await;
+    assert!(listed.contains("fromtheindex"));
+
+    let unbound = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/unbind",
+            Some(&origin),
+            "application/json",
+            r#"{"name":"fromtheindex"}"#,
+        ),
+    )
+    .await;
+    assert!(unbound.starts_with("HTTP/1.1 200"), "got: {unbound}");
+}
+
+#[tokio::test]
+async fn binding_the_proxy_to_itself_is_refused_from_the_page_too() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    let response = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some(&origin),
+            "application/json",
+            &format!(r#"{{"name":"loop","target":"{proxy}"}}"#),
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 400"), "got: {response}");
+    assert!(response.contains("loop"));
+}
+
+#[tokio::test]
+async fn a_bound_hostname_still_proxies_rather_than_showing_the_index() {
+    // The index must not shadow real traffic: /_ports/ paths only belong to it
+    // on hostnames it actually serves.
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = upstream.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\
+                          content-length: 8\r\n\r\nupstream",
+                    )
+                    .await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    let proxy = start_proxy("myapp", format!("127.0.0.1:{upstream_port}")).await;
+    let response = request(proxy, "myapp.localhost", "/_ports/data").await;
+
+    // The app's own /_ports/data, not ours.
+    assert!(response.contains("upstream"), "got: {response}");
+}

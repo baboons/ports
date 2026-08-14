@@ -5,6 +5,8 @@
 //! minute apart. The cache is an optimisation only — starting cold is always
 //! correct, so every failure here degrades to a full scan rather than an error.
 
+pub mod favicons;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

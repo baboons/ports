@@ -33,6 +33,11 @@ pub struct ScanOptions {
     pub prior: Vec<PortRecord>,
     /// Port this process is serving on, so we can flag it rather than hide it.
     pub self_port: Option<u16>,
+    /// Download and cache icon bytes for anything serving HTML.
+    ///
+    /// Off for the terminal listing, which has nothing to draw them with, and
+    /// on for the daemon, which serves them to the index page.
+    pub fetch_favicons: bool,
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -43,6 +48,7 @@ impl Default for ScanOptions {
             force: false,
             prior: Vec::new(),
             self_port: None,
+            fetch_favicons: false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -214,6 +220,11 @@ where
         records.insert(port, merged);
     }
 
+    // --- Icons, for whatever is going to be displayed. ---
+    if options.fetch_favicons && !options.cancel.load(Ordering::Relaxed) {
+        fetch_favicons(&mut records, &prior).await;
+    }
+
     // --- Process enrichment, batched across every pid at once. ---
     let pids: Vec<u32> = records
         .values()
@@ -257,6 +268,47 @@ where
     ScanResult {
         records: all,
         swept_fully,
+    }
+}
+
+/// Download icons for anything advertising one.
+///
+/// An icon whose URL has not changed keeps the hash we already have, so a
+/// steady machine re-fetches nothing.
+async fn fetch_favicons(records: &mut HashMap<u16, PortRecord>, prior: &HashMap<u16, PortRecord>) {
+    let wanted: Vec<(u16, String)> = records
+        .values()
+        .filter_map(|record| {
+            let url = record.meta.as_ref()?.favicon_url.as_ref()?;
+            Some((record.port, url.clone()))
+        })
+        .collect();
+
+    let mut handles = Vec::with_capacity(wanted.len());
+    for (port, url) in wanted {
+        let cached = prior.get(&port).and_then(|p| {
+            let meta = p.meta.as_ref()?;
+            // Same URL as last time means the same icon; do not refetch.
+            (meta.favicon_url.as_deref() == Some(url.as_str()))
+                .then(|| meta.favicon_hash.clone())
+                .flatten()
+        });
+
+        handles.push(tokio::spawn(async move {
+            match cached {
+                Some(hash) => (port, Some(hash)),
+                None => (port, crate::cache::favicons::cache_favicon(&url).await),
+            }
+        }));
+    }
+
+    for handle in handles {
+        let Ok((port, Some(hash))) = handle.await else {
+            continue;
+        };
+        if let Some(meta) = records.get_mut(&port).and_then(|r| r.meta.as_mut()) {
+            meta.favicon_hash = Some(hash);
+        }
     }
 }
 

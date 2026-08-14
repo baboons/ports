@@ -1,0 +1,533 @@
+//! The index page: what is bound, what is running, and one click between them.
+//!
+//! Served by the proxy itself rather than a second server, at the reserved
+//! `ports.<tld>` and on any hostname nothing is bound to — the second is where
+//! you land by accident, which is exactly when you want it.
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::bindings::{normalise_name, normalise_target, Bindings};
+use crate::types::{PortRecord, Protocol};
+
+/// The subdomain the index always answers on.
+pub const INDEX_NAME: &str = "ports";
+
+/// Is this hostname the reserved index name?
+pub fn is_index_host(host: &str, tld: &str) -> bool {
+    let host = host.split(':').next().unwrap_or(host).to_lowercase();
+    host == format!("{INDEX_NAME}.{tld}")
+}
+
+/// A row for the page: either something bound, or something merely running.
+#[derive(Serialize)]
+pub struct Row {
+    pub port: u16,
+    /// The bound hostname, when there is one.
+    pub hostname: Option<String>,
+    /// The name a bind would use, for the button to pre-fill.
+    pub suggested: Option<String>,
+    pub title: String,
+    pub status: Option<u16>,
+    pub protocol: String,
+    pub project: Option<String>,
+    pub framework: Option<String>,
+    pub favicon: Option<String>,
+    pub url: String,
+    pub up: bool,
+}
+
+#[derive(Serialize)]
+pub struct Snapshot {
+    pub tld: String,
+    pub http_port: u16,
+    pub bound: Vec<Row>,
+    pub unbound: Vec<Row>,
+}
+
+/// What to show, given the bindings and the last scan.
+pub fn snapshot(bindings: &Bindings, records: &[PortRecord]) -> Snapshot {
+    let by_port: std::collections::HashMap<u16, &PortRecord> =
+        records.iter().map(|r| (r.port, r)).collect();
+
+    // Links must carry the proxy's port unless it is the default one.
+    let port_suffix = if bindings.http_port == 80 {
+        String::new()
+    } else {
+        format!(":{}", bindings.http_port)
+    };
+
+    let mut bound = Vec::new();
+    let mut bound_ports = std::collections::HashSet::new();
+
+    for binding in &bindings.bindings {
+        let port: u16 = binding
+            .target
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
+        bound_ports.insert(port);
+
+        let record = by_port.get(&port);
+        let hostname = binding.hostname(&bindings.tld);
+
+        bound.push(Row {
+            port,
+            url: format!("http://{hostname}{port_suffix}/"),
+            hostname: Some(hostname),
+            suggested: None,
+            title: record
+                .map(|r| r.label().to_string())
+                .unwrap_or_else(|| binding.name.clone()),
+            status: record.and_then(|r| r.http.as_ref().map(|h| h.status)),
+            protocol: record
+                .map(|r| r.protocol.as_str().to_string())
+                .unwrap_or_else(|| "http".into()),
+            project: record.and_then(|r| r.process.as_ref()?.project_name.clone()),
+            framework: record.and_then(|r| r.http.as_ref()?.framework.clone()),
+            favicon: record.and_then(|r| r.meta.as_ref()?.favicon_hash.clone()),
+            // Whether the record is alive is the scan's word; a binding to a
+            // port nothing is on shows as down rather than vanishing.
+            up: record.map(|r| r.alive).unwrap_or(false),
+        });
+    }
+
+    let mut unbound: Vec<Row> = records
+        .iter()
+        .filter(|record| record.alive && record.protocol.is_web())
+        .filter(|record| !bound_ports.contains(&record.port))
+        // The proxy's own port would be a loop, and is not something to offer.
+        .filter(|record| record.port != bindings.http_port)
+        .filter(|record| bindings.https_port != Some(record.port))
+        .map(|record| {
+            let scheme = if record.protocol == Protocol::Https {
+                "https"
+            } else {
+                "http"
+            };
+            Row {
+                port: record.port,
+                hostname: None,
+                suggested: suggest_name(record),
+                title: record.label().to_string(),
+                status: record.http.as_ref().map(|h| h.status),
+                protocol: record.protocol.as_str().to_string(),
+                project: record.process.as_ref().and_then(|p| p.project_name.clone()),
+                framework: record.http.as_ref().and_then(|h| h.framework.clone()),
+                favicon: record.meta.as_ref().and_then(|m| m.favicon_hash.clone()),
+                url: format!("{scheme}://127.0.0.1:{}/", record.port),
+                up: true,
+            }
+        })
+        .collect();
+
+    unbound.sort_by_key(|r| r.port);
+    bound.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+
+    Snapshot {
+        tld: bindings.tld.clone(),
+        http_port: bindings.http_port,
+        bound,
+        unbound,
+    }
+}
+
+/// The name `bind` would pick for this port, so the button can pre-fill it.
+fn suggest_name(record: &PortRecord) -> Option<String> {
+    use crate::cli::bind::slugify;
+    record
+        .process
+        .as_ref()
+        .and_then(|p| p.project_name.as_deref())
+        .and_then(slugify)
+        .or_else(|| record.meta.as_ref()?.title.as_deref().and_then(slugify))
+}
+
+#[derive(Deserialize)]
+pub struct BindRequest {
+    pub name: String,
+    pub target: String,
+}
+
+#[derive(Deserialize)]
+pub struct UnbindRequest {
+    pub name: String,
+}
+
+/// Apply a bind from the page, with the same rules the CLI uses.
+pub fn apply_bind(bindings: &mut Bindings, request: &BindRequest) -> Result<String, String> {
+    let Some(target) = normalise_target(&request.target) else {
+        return Err(format!("'{}' is not a port or host:port", request.target));
+    };
+
+    let port: u16 = target.rsplit(':').next().unwrap_or("").parse().unwrap_or(0);
+    if bindings.own_ports().contains(&port) {
+        return Err(format!("port {port} is the proxy itself — that would loop"));
+    }
+
+    let Some(name) = normalise_name(&request.name, &bindings.tld) else {
+        return Err(format!("'{}' is not a valid hostname label", request.name));
+    };
+    if name == INDEX_NAME {
+        return Err(format!("'{INDEX_NAME}' is reserved for this page"));
+    }
+
+    bindings.upsert(name.clone(), target, crate::types::now_ms());
+    Ok(format!("{name}.{}", bindings.tld))
+}
+
+pub fn apply_unbind(bindings: &mut Bindings, request: &UnbindRequest) -> Result<String, String> {
+    let Some(name) = normalise_name(&request.name, &bindings.tld) else {
+        return Err(format!("'{}' is not a valid hostname label", request.name));
+    };
+    if !bindings.remove(&name) {
+        return Err(format!("'{name}' is not bound"));
+    }
+    Ok(name)
+}
+
+/// Render the page.
+///
+/// `missing` names the hostname the visitor asked for, when they arrived here
+/// by typing something that is not bound.
+pub fn render(snapshot: &Snapshot, missing: Option<&str>) -> String {
+    let data = serde_json::to_string(snapshot).unwrap_or_else(|_| "{}".into());
+
+    let banner = match missing {
+        Some(host) => format!(
+            "<p class=miss>Nothing is bound to <code>{}</code>.</p>",
+            escape(host)
+        ),
+        None => String::new(),
+    };
+
+    format!(
+        r#"<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>ports</title>
+<style>{CSS}</style>
+<h1>ports <span class=tld>*.{tld}</span></h1>
+{banner}
+<div id=app></div>
+<script>const DATA={data};{JS}</script>
+"#,
+        tld = escape(&snapshot.tld),
+    )
+}
+
+fn escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+const CSS: &str = r#"
+:root{--bg:#fff;--fg:#1a1a1a;--dim:#666;--line:#e6e6e6;--accent:#2563eb;
+--ok:#15803d;--down:#b91c1c;--chip:#f3f4f6}
+@media(prefers-color-scheme:dark){:root{--bg:#141414;--fg:#e8e8e8;--dim:#8b8b8b;
+--line:#2a2a2a;--accent:#7aa2f7;--ok:#4ade80;--down:#f87171;--chip:#1f1f1f}}
+*{box-sizing:border-box}
+body{margin:0;padding:2.5rem 1.5rem 4rem;background:var(--bg);color:var(--fg);
+font:14px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+max-width:56rem;margin-inline:auto}
+h1{font-size:1.1rem;font-weight:600;margin:0 0 1.5rem;letter-spacing:-.01em}
+.tld{color:var(--dim);font-weight:400;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+h2{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
+color:var(--dim);margin:2rem 0 .5rem}
+.miss{background:var(--chip);border-radius:6px;padding:.6rem .9rem;margin:0 0 1.5rem}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
+.row{display:flex;align-items:center;gap:.85rem;padding:.6rem .25rem;
+border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.icon{width:18px;height:18px;flex:0 0 18px;border-radius:3px;object-fit:contain}
+.icon.blank{background:var(--chip)}
+.main{flex:1;min-width:0}
+.name{display:block;color:inherit;text-decoration:none;font-weight:500;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.name:hover{color:var(--accent);text-decoration:underline}
+.sub{color:var(--dim);font-size:.82rem;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}
+.meta{display:flex;align-items:center;gap:.5rem;flex:0 0 auto}
+.chip{background:var(--chip);border-radius:4px;padding:.1rem .4rem;font-size:.75rem;
+color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.up{color:var(--ok)}.down{color:var(--down)}
+button{font:inherit;font-size:.8rem;padding:.25rem .7rem;border-radius:5px;
+border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button:disabled{opacity:.5;cursor:default}
+.empty{color:var(--dim);padding:.6rem .25rem}
+.err{color:var(--down);font-size:.82rem;padding:.4rem .25rem}
+"#;
+
+const JS: &str = r#"
+const $=(h)=>{const d=document.createElement('div');d.innerHTML=h;return d.firstElementChild};
+const esc=(s)=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function row(r, bound){
+  const icon = r.favicon
+    ? `<img class=icon src="/_ports/favicon/${esc(r.favicon)}" alt="">`
+    : `<span class="icon blank"></span>`;
+  const label = bound ? r.hostname : `localhost:${r.port}`;
+  const bits = [r.project, r.framework, bound ? `:${r.port}` : null].filter(Boolean);
+  const status = r.status ? `<span class=chip>${r.status}</span>` : '';
+  const health = bound
+    ? `<span class="${r.up?'up':'down'}">${r.up?'up':'down'}</span>` : '';
+  const action = bound
+    ? `<button data-unbind="${esc(r.hostname.replace('.'+DATA.tld,''))}">unbind</button>`
+    : `<button data-bind="${r.port}" data-name="${esc(r.suggested||'')}">bind</button>`;
+
+  return `<div class=row>${icon}
+    <div class=main>
+      <a class=name href="${esc(r.url)}" target=_blank rel=noreferrer>${esc(label)}</a>
+      <span class=sub>${esc(r.title)}${bits.length?' · '+esc(bits.join(' · ')):''}</span>
+    </div>
+    <div class=meta>${status}${health}${action}</div>
+  </div>`;
+}
+
+function render(d){
+  document.getElementById('app').innerHTML =
+    `<h2>Bound</h2>` +
+    (d.bound.length ? d.bound.map(r=>row(r,true)).join('')
+                    : `<div class=empty>Nothing bound yet.</div>`) +
+    `<h2>Running, not bound</h2>` +
+    (d.unbound.length ? d.unbound.map(r=>row(r,false)).join('')
+                      : `<div class=empty>Nothing else running.</div>`);
+}
+
+async function post(path, body, button){
+  button.disabled = true;
+  try{
+    const res = await fetch(path, {
+      method:'POST',
+      // JSON forces a CORS preflight, which a page from another origin
+      // cannot satisfy. Together with the server's Origin check that is
+      // what stops any website from rebinding your domains.
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const out = await res.json();
+    if(!res.ok) throw new Error(out.error || res.statusText);
+    await refresh();
+  }catch(err){
+    const note = $(`<div class=err>${esc(err.message)}</div>`);
+    button.closest('.row').after(note);
+    setTimeout(()=>note.remove(), 6000);
+    button.disabled = false;
+  }
+}
+
+async function refresh(){
+  const res = await fetch('/_ports/data');
+  render(await res.json());
+}
+
+document.addEventListener('click', (event)=>{
+  const bind = event.target.closest('[data-bind]');
+  if(bind){
+    const suggested = bind.dataset.name || `app${bind.dataset.bind}`;
+    const name = prompt('Bind as which name?', suggested);
+    if(name) post('/_ports/bind', {name, target: bind.dataset.bind}, bind);
+    return;
+  }
+  const unbind = event.target.closest('[data-unbind]');
+  if(unbind) post('/_ports/unbind', {name: unbind.dataset.unbind}, unbind);
+});
+
+render(DATA);
+// The daemon rescans every 20s; matching that keeps the page roughly current
+// without polling for the sake of it.
+setInterval(refresh, 20000);
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{DiscoveryTier, HttpInfo, PageMeta, ProcessInfo};
+
+    fn web_record(port: u16, title: &str) -> PortRecord {
+        let mut record = PortRecord::new(port, DiscoveryTier::Lsof, "127.0.0.1", 0);
+        record.protocol = Protocol::Http;
+        record.http = Some(HttpInfo {
+            status: 200,
+            ..Default::default()
+        });
+        record.meta = Some(PageMeta {
+            title: Some(title.into()),
+            ..Default::default()
+        });
+        record
+    }
+
+    #[test]
+    fn recognises_the_reserved_index_hostname() {
+        assert!(is_index_host("ports.localhost", "localhost"));
+        assert!(is_index_host("ports.localhost:8080", "localhost"));
+        assert!(is_index_host("PORTS.LOCALHOST", "localhost"));
+        assert!(!is_index_host("myapp.localhost", "localhost"));
+        assert!(!is_index_host("ports.test", "localhost"));
+    }
+
+    #[test]
+    fn separates_what_is_bound_from_what_is_merely_running() {
+        let mut bindings = Bindings::default();
+        bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
+
+        let records = vec![web_record(3000, "Acme"), web_record(5173, "Vite")];
+        let snap = snapshot(&bindings, &records);
+
+        assert_eq!(snap.bound.len(), 1);
+        assert_eq!(snap.bound[0].hostname.as_deref(), Some("web.localhost"));
+        assert!(snap.bound[0].up);
+
+        assert_eq!(snap.unbound.len(), 1);
+        assert_eq!(snap.unbound[0].port, 5173);
+    }
+
+    #[test]
+    fn a_binding_whose_server_stopped_shows_as_down_rather_than_vanishing() {
+        let mut bindings = Bindings::default();
+        bindings.upsert("gone".into(), "127.0.0.1:9999".into(), 0);
+
+        let snap = snapshot(&bindings, &[]);
+        assert_eq!(snap.bound.len(), 1);
+        assert!(!snap.bound[0].up);
+    }
+
+    #[test]
+    fn the_proxys_own_ports_are_never_offered_for_binding() {
+        let bindings = Bindings {
+            http_port: 80,
+            https_port: Some(443),
+            ..Default::default()
+        };
+        let records = vec![web_record(80, "the proxy"), web_record(443, "the proxy")];
+
+        let snap = snapshot(&bindings, &records);
+        assert!(
+            snap.unbound.is_empty(),
+            "binding the proxy to itself would loop forever"
+        );
+    }
+
+    #[test]
+    fn suggests_a_name_from_the_project_then_the_title() {
+        let mut record = web_record(3000, "Acme Dashboard");
+        assert_eq!(suggest_name(&record).as_deref(), Some("acme-dashboard"));
+
+        record.process = Some(ProcessInfo {
+            pid: 1,
+            project_name: Some("@acme/web".into()),
+            ..Default::default()
+        });
+        // The project wins: it is what the repo is called.
+        assert_eq!(suggest_name(&record).as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn binding_applies_the_same_rules_as_the_cli() {
+        let mut bindings = Bindings::default();
+
+        let ok = apply_bind(
+            &mut bindings,
+            &BindRequest {
+                name: "myapp".into(),
+                target: "4000".into(),
+            },
+        );
+        assert_eq!(ok.as_deref(), Ok("myapp.localhost"));
+        assert_eq!(bindings.get("myapp").unwrap().target, "127.0.0.1:4000");
+
+        // A bare port is fine; nonsense is not.
+        assert!(apply_bind(
+            &mut bindings,
+            &BindRequest {
+                name: "x".into(),
+                target: "not-a-port".into()
+            }
+        )
+        .is_err());
+        assert!(apply_bind(
+            &mut bindings,
+            &BindRequest {
+                name: "has space".into(),
+                target: "4000".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_index_name_cannot_be_bound_away() {
+        let mut bindings = Bindings::default();
+        let result = apply_bind(
+            &mut bindings,
+            &BindRequest {
+                name: "ports".into(),
+                target: "4000".into(),
+            },
+        );
+        assert!(result.is_err(), "binding over the index would hide it");
+    }
+
+    #[test]
+    fn binding_the_proxy_to_itself_is_refused() {
+        let mut bindings = Bindings {
+            http_port: 8080,
+            ..Default::default()
+        };
+        let result = apply_bind(
+            &mut bindings,
+            &BindRequest {
+                name: "loop".into(),
+                target: "8080".into(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unbinding_reports_whether_anything_went() {
+        let mut bindings = Bindings::default();
+        bindings.upsert("myapp".into(), "127.0.0.1:4000".into(), 0);
+
+        assert!(apply_unbind(
+            &mut bindings,
+            &UnbindRequest {
+                name: "myapp".into()
+            }
+        )
+        .is_ok());
+        assert!(apply_unbind(
+            &mut bindings,
+            &UnbindRequest {
+                name: "myapp".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_page_escapes_untrusted_hostnames() {
+        let snap = snapshot(&Bindings::default(), &[]);
+        let html = render(&snap, Some("<script>alert(1)</script>.localhost"));
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_page_inlines_its_own_assets() {
+        let mut bindings = Bindings::default();
+        bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
+        let html = render(&snapshot(&bindings, &[]), None);
+
+        // Links to local servers are the point; loading assets from a CDN is
+        // what would break this on a machine with no network.
+        assert!(!html.contains("<script src"), "script should be inline");
+        assert!(!html.contains("rel=stylesheet"), "styles should be inline");
+        assert!(!html.contains("@import"));
+    }
+}

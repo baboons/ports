@@ -106,6 +106,9 @@ pub struct PageMeta {
     /// Absolute URL of the best favicon candidate we found.
     #[serde(rename = "faviconUrl", skip_serializing_if = "Option::is_none")]
     pub favicon_url: Option<String>,
+    /// Content hash of the fetched icon bytes; the key the index page serves by.
+    #[serde(rename = "faviconHash", skip_serializing_if = "Option::is_none")]
+    pub favicon_hash: Option<String>,
 }
 
 /// The kind of project a working directory turned out to hold.
