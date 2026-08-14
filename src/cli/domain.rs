@@ -74,7 +74,10 @@ pub fn domain(new_tld: Option<String>) -> anyhow::Result<()> {
         if old_path.exists() {
             println!(
                 "{}",
-                gray(&format!("  no longer needed:  sudo rm {}", old_path.display()))
+                gray(&format!(
+                    "  no longer needed:  sudo rm {}",
+                    old_path.display()
+                ))
             );
         }
     }
@@ -215,7 +218,15 @@ mod tests {
         for good in ["test", "localhost", "lo", "internal", "dev-box"] {
             assert!(is_valid_tld(good), "{good} should be valid");
         }
-        for bad in ["", "has space", "under_score", "-lead", "trail-", "123", "a.b"] {
+        for bad in [
+            "",
+            "has space",
+            "under_score",
+            "-lead",
+            "trail-",
+            "123",
+            "a.b",
+        ] {
             assert!(!is_valid_tld(bad), "{bad} should be rejected");
         }
     }

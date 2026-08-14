@@ -110,7 +110,12 @@ mod tests {
         // People have jq filters written against these names.
         let record = PortRecord::new(3000, DiscoveryTier::Sweep, "0.0.0.0", 1);
         let json = serde_json::to_string(&record).unwrap();
-        for key in ["\"port\"", "\"probedAddress\"", "\"isSelf\"", "\"firstSeen\""] {
+        for key in [
+            "\"port\"",
+            "\"probedAddress\"",
+            "\"isSelf\"",
+            "\"firstSeen\"",
+        ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
     }

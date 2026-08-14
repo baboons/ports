@@ -56,11 +56,7 @@ async fn request(proxy_port: u16, host: &str, path: &str) -> String {
         .unwrap();
 
     let mut response = Vec::new();
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        socket.read_to_end(&mut response),
-    )
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response)).await;
     String::from_utf8_lossy(&response).into_owned()
 }
 
@@ -164,7 +160,9 @@ async fn rewrites_a_redirect_that_points_at_the_raw_upstream() {
     // Following the upstream's own Location would walk the browser off the
     // proxy and onto the raw port, losing the hostname and its cookies.
     assert!(
-        response.to_lowercase().contains(&format!("location: http://myapp.localhost:{proxy}/login")),
+        response
+            .to_lowercase()
+            .contains(&format!("location: http://myapp.localhost:{proxy}/login")),
         "redirect was not rewritten:\n{response}"
     );
 }
@@ -251,7 +249,9 @@ async fn completes_a_websocket_upgrade_and_pipes_both_directions() {
                 let request = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
 
                 if !request.contains("upgrade: websocket") {
-                    let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n").await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                        .await;
                     return;
                 }
 

@@ -238,9 +238,7 @@ struct FetchOutcome {
 /// One request/response exchange, reading at most `MAX_BODY_BYTES` of body.
 async fn fetch_once(url: &Uri, secure: bool) -> anyhow::Result<FetchOutcome> {
     let host = url.host().ok_or_else(|| anyhow::anyhow!("no host"))?;
-    let port = url
-        .port_u16()
-        .unwrap_or(if secure { 443 } else { 80 });
+    let port = url.port_u16().unwrap_or(if secure { 443 } else { 80 });
 
     // A bracketed IPv6 literal in the URI needs unwrapping before it can be
     // handed to the resolver.
@@ -251,10 +249,7 @@ async fn fetch_once(url: &Uri, secure: bool) -> anyhow::Result<FetchOutcome> {
     // proxy-form (`GET http://host/ HTTP/1.1`), which is legal but routes
     // differently on servers that match the raw target — Chrome's DevTools
     // endpoint answers 404 to it, so we would misreport a healthy service.
-    let target = url
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+    let target = url.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     let request = Request::builder()
         .method("GET")
@@ -279,13 +274,15 @@ async fn fetch_once(url: &Uri, secure: bool) -> anyhow::Result<FetchOutcome> {
             connection.protocol_version().map(|v| format!("{v:?}")),
         );
 
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
         (sender.send_request(request).await?, tls)
     } else {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
@@ -338,14 +335,20 @@ fn is_loopback_host(host: &str) -> bool {
         || host == "127.0.0.1"
         || host == "::1"
         || host.ends_with(".localhost")
-        || host.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 /// GET a URL, following a few redirects so long as they stay on this machine.
 ///
 /// An external redirect is left unfollowed and recorded as such: a localhost
 /// port that bounces you to a public site is a finding, not something to chase.
-async fn fetch_head(start: Uri, secure: bool) -> anyhow::Result<(FetchOutcome, u16, Option<String>)> {
+async fn fetch_head(
+    start: Uri,
+    secure: bool,
+) -> anyhow::Result<(FetchOutcome, u16, Option<String>)> {
     let mut url = start;
     let mut secure = secure;
     let mut first_status: Option<u16> = None;
@@ -471,7 +474,11 @@ async fn probe_inner(port: u16, host: IpAddr) -> ProbeResult {
             let meta = is_html.then(|| extract_meta(&outcome.body, &outcome.final_url));
 
             ProbeResult {
-                protocol: if secure { Protocol::Https } else { Protocol::Http },
+                protocol: if secure {
+                    Protocol::Https
+                } else {
+                    Protocol::Http
+                },
                 http: Some(http),
                 meta,
                 tls: outcome.tls,
@@ -537,10 +544,7 @@ mod tests {
         assert_eq!(http.status, 200);
         assert_eq!(http.server.as_deref(), Some("nginx"));
         assert_eq!(http.framework.as_deref(), Some("nginx"));
-        assert_eq!(
-            result.meta.and_then(|m| m.title).as_deref(),
-            Some("Acme")
-        );
+        assert_eq!(result.meta.and_then(|m| m.title).as_deref(), Some("Acme"));
     }
 
     /// Capture the raw bytes of the second request a probe makes.
@@ -565,7 +569,9 @@ mod tests {
                             .push(String::from_utf8_lossy(&buffer[..n]).into_owned());
                     }
                     let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        )
                         .await;
                     let _ = socket.shutdown().await;
                 });

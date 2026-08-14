@@ -12,9 +12,7 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-use netstat2::{
-    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
-};
+use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 
 use crate::types::{Family, Listener};
 
@@ -88,7 +86,7 @@ fn parse_address(raw: &str) -> Option<(String, u16)> {
 
     let last_colon = value.rfind(':')?;
     let port: u32 = value[last_colon + 1..].parse().ok()?;
-    if port < 1 || port > 65535 {
+    if !(1..=65535).contains(&port) {
         return None;
     }
 

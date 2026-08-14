@@ -192,7 +192,9 @@ pub async fn bind(name: Option<String>, target: String) -> anyhow::Result<()> {
     if !is_reachable(&target).await {
         println!(
             "{}",
-            gray(&format!("  nothing listening on {target} yet — the binding is saved regardless"))
+            gray(&format!(
+                "  nothing listening on {target} yet — the binding is saved regardless"
+            ))
         );
     } else if let Some(warning) = check_through_proxy(&hostname, bindings.http_port).await {
         println!("\n{warning}");
@@ -213,7 +215,10 @@ pub fn unbind(name: String) -> anyhow::Result<()> {
     }
     save_bindings(&bindings)?;
 
-    println!("\n  unbound {}\n", bold(&format!("{name}.{}", bindings.tld)));
+    println!(
+        "\n  unbound {}\n",
+        bold(&format!("{name}.{}", bindings.tld))
+    );
     Ok(())
 }
 
@@ -266,7 +271,10 @@ pub async fn links() -> anyhow::Result<()> {
         );
     }
 
-    println!("\n{}\n", dim(&format!("  {} bound", bindings.bindings.len())));
+    println!(
+        "\n{}\n",
+        dim(&format!("  {} bound", bindings.bindings.len()))
+    );
     Ok(())
 }
 

@@ -124,8 +124,16 @@ pub fn merge_record(prev: Option<&PortRecord>, next: PortRecord, now: u64) -> Po
     let mut merged = next;
 
     merged.first_seen = {
-        let a = if prev.first_seen == 0 { now } else { prev.first_seen };
-        let b = if merged.first_seen == 0 { now } else { merged.first_seen };
+        let a = if prev.first_seen == 0 {
+            now
+        } else {
+            prev.first_seen
+        };
+        let b = if merged.first_seen == 0 {
+            now
+        } else {
+            merged.first_seen
+        };
         a.min(b)
     };
 
@@ -209,8 +217,14 @@ mod tests {
 
     fn with_status(status: u16, title: &str) -> PortRecord {
         let mut r = record();
-        r.http = Some(HttpInfo { status, ..Default::default() });
-        r.meta = Some(PageMeta { title: Some(title.into()), ..Default::default() });
+        r.http = Some(HttpInfo {
+            status,
+            ..Default::default()
+        });
+        r.meta = Some(PageMeta {
+            title: Some(title.into()),
+            ..Default::default()
+        });
         r
     }
 
@@ -223,7 +237,10 @@ mod tests {
         b.probe_ms = Some(412);
 
         assert_eq!(fingerprint_of(&a), fingerprint_of(&b));
-        assert_ne!(fingerprint_of(&a), fingerprint_of(&with_status(500, "Acme")));
+        assert_ne!(
+            fingerprint_of(&a),
+            fingerprint_of(&with_status(500, "Acme"))
+        );
     }
 
     #[test]
@@ -335,12 +352,7 @@ mod tests {
         other.id = "8021".into();
         known.insert(8021, other);
 
-        let changed = mark_missing(
-            &mut known,
-            &HashSet::new(),
-            &HashSet::from([3000]),
-            5000,
-        );
+        let changed = mark_missing(&mut known, &HashSet::new(), &HashSet::from([3000]), 5000);
 
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].port, 3000);

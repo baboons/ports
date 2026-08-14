@@ -118,16 +118,19 @@ pub fn rank_favicons(html: &str, base_url: &str) -> Vec<FaviconCandidate> {
     let mut out: Vec<FaviconCandidate> = Vec::new();
 
     for element in document.select(&selector) {
-        let attr = |name: &str| -> Option<String> {
-            element.value().attr(name).map(|v| v.to_string())
-        };
+        let attr =
+            |name: &str| -> Option<String> { element.value().attr(name).map(|v| v.to_string()) };
 
         let rel = attr("rel").unwrap_or_default().to_lowercase();
         let rels: Vec<&str> = rel.split_whitespace().collect();
         let is_icon = rels.iter().any(|r| {
             matches!(
                 *r,
-                "icon" | "shortcut" | "apple-touch-icon" | "apple-touch-icon-precomposed" | "mask-icon"
+                "icon"
+                    | "shortcut"
+                    | "apple-touch-icon"
+                    | "apple-touch-icon-precomposed"
+                    | "mask-icon"
             )
         });
         if !is_icon {
@@ -159,7 +162,7 @@ pub fn rank_favicons(html: &str, base_url: &str) -> Vec<FaviconCandidate> {
             if sizes == "any" {
                 score += 50.0;
             } else if let Some(width) = sizes
-                .split(|c| c == 'x' || c == ' ')
+                .split(['x', ' '])
                 .next()
                 .and_then(|w| w.trim().parse::<f64>().ok())
             {
@@ -168,13 +171,20 @@ pub fn rank_favicons(html: &str, base_url: &str) -> Vec<FaviconCandidate> {
         }
 
         if let Some(resolved) = resolve_url(href, base_url) {
-            out.push(FaviconCandidate { href: resolved, score });
+            out.push(FaviconCandidate {
+                href: resolved,
+                score,
+            });
         }
     }
 
     // Stable, so equally-scored icons keep document order — the author's own
     // ordering is the best tiebreak available.
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -194,9 +204,8 @@ pub fn extract_meta(html: &str, base_url: &str) -> PageMeta {
     };
 
     for element in document.select(&meta_selector) {
-        let attr = |name: &str| -> Option<String> {
-            element.value().attr(name).map(|v| v.to_string())
-        };
+        let attr =
+            |name: &str| -> Option<String> { element.value().attr(name).map(|v| v.to_string()) };
 
         let Some(key) = attr("name").or_else(|| attr("property")) else {
             continue;
@@ -213,7 +222,9 @@ pub fn extract_meta(html: &str, base_url: &str) -> PageMeta {
                 meta.og_description = meta.og_description.or_else(|| clean(&content))
             }
             "og:image" => {
-                meta.og_image = meta.og_image.or_else(|| resolve_url(content.trim(), base_url))
+                meta.og_image = meta
+                    .og_image
+                    .or_else(|| resolve_url(content.trim(), base_url))
             }
             "theme-color" => meta.theme_color = meta.theme_color.or_else(|| clean(&content)),
             _ => {}
@@ -271,9 +282,7 @@ pub fn detect_framework(headers: &std::collections::HashMap<String, String>) -> 
             "Nuxt".into()
         } else if lower.contains("php") {
             // "PHP/8.3.1" reads better as "PHP 8.3.1".
-            let version = powered.trim_start_matches(|c: char| {
-                c.is_ascii_alphabetic() || c == '/'
-            });
+            let version = powered.trim_start_matches(|c: char| c.is_ascii_alphabetic() || c == '/');
             format!("PHP {version}").trim().to_string()
         } else if lower.contains("asp.net") {
             "ASP.NET".into()

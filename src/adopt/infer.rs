@@ -49,13 +49,18 @@ const FRAMEWORK_DEFAULTS: &[(&str, u16)] = &[
 ];
 
 fn valid(port: u32) -> Option<u16> {
-    (port >= 1 && port <= 65535).then_some(port as u16)
+    (1..=65535).contains(&port).then_some(port as u16)
 }
 
 /// Read `PORT=` out of the .env files a dev server would load.
 fn from_dotenv(dir: &Path) -> Option<u16> {
     // Ordered the way most loaders resolve precedence, most specific first.
-    for file in [".env.development.local", ".env.local", ".env.development", ".env"] {
+    for file in [
+        ".env.development.local",
+        ".env.local",
+        ".env.development",
+        ".env",
+    ] {
         let Ok(raw) = std::fs::read_to_string(dir.join(file)) else {
             continue;
         };
@@ -125,7 +130,12 @@ fn port_from_config_source(raw: &str) -> Option<u16> {
 }
 
 fn from_framework_config(dir: &Path) -> Option<u16> {
-    for stem in ["vite.config", "astro.config", "nuxt.config", "svelte.config"] {
+    for stem in [
+        "vite.config",
+        "astro.config",
+        "nuxt.config",
+        "svelte.config",
+    ] {
         for ext in ["ts", "js", "mjs", "mts", "cjs"] {
             let Ok(raw) = std::fs::read_to_string(dir.join(format!("{stem}.{ext}"))) else {
                 continue;
@@ -147,9 +157,13 @@ fn read_package_json(dir: &Path) -> Option<PackageJson> {
     let raw = std::fs::read_to_string(dir.join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
 
-    let dev_script = ["dev", "start", "serve"]
-        .iter()
-        .find_map(|name| value.get("scripts")?.get(name)?.as_str().map(str::to_string));
+    let dev_script = ["dev", "start", "serve"].iter().find_map(|name| {
+        value
+            .get("scripts")?
+            .get(name)?
+            .as_str()
+            .map(str::to_string)
+    });
 
     let mut dependencies = Vec::new();
     for section in ["dependencies", "devDependencies"] {
@@ -224,7 +238,10 @@ mod tests {
 
     #[test]
     fn does_not_mistake_other_numbers_for_a_port() {
-        assert_eq!(port_from_command("node --max-old-space-size=4096 x.js"), None);
+        assert_eq!(
+            port_from_command("node --max-old-space-size=4096 x.js"),
+            None
+        );
         assert_eq!(port_from_command("tsc -p tsconfig.json"), None);
     }
 
@@ -233,7 +250,10 @@ mod tests {
         // The dev server reads PORT at runtime, so it wins over the flag.
         let dir = dir_with(&[
             (".env", "PORT=4500\n"),
-            ("package.json", r#"{"scripts":{"dev":"next dev --port 3001"}}"#),
+            (
+                "package.json",
+                r#"{"scripts":{"dev":"next dev --port 3001"}}"#,
+            ),
         ]);
         assert_eq!(infer_port(dir.path()), Some((4500, PortSource::DotEnv)));
     }
@@ -257,7 +277,10 @@ mod tests {
     fn reads_a_vite_config_port() {
         let dir = dir_with(&[
             ("package.json", r#"{"scripts":{"dev":"vite"}}"#),
-            ("vite.config.ts", "export default { server: { port: 5180 } }"),
+            (
+                "vite.config.ts",
+                "export default { server: { port: 5180 } }",
+            ),
         ]);
         assert_eq!(
             infer_port(dir.path()),

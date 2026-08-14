@@ -209,7 +209,11 @@ fn systemd_unit(system: bool) -> anyhow::Result<String> {
          \n\
          [Install]\n\
          WantedBy={}\n",
-        if system { "multi-user.target" } else { "default.target" }
+        if system {
+            "multi-user.target"
+        } else {
+            "default.target"
+        }
     ))
 }
 
@@ -302,7 +306,10 @@ fn install(
         };
         // bootout first so a reinstall replaces rather than conflicts.
         let _ = run("launchctl", &["bootout", &domain, &path.to_string_lossy()]);
-        run("launchctl", &["bootstrap", &domain, &path.to_string_lossy()])?;
+        run(
+            "launchctl",
+            &["bootstrap", &domain, &path.to_string_lossy()],
+        )?;
         println!("  loaded {}", bold(LAUNCHD_LABEL));
     }
 
@@ -310,7 +317,11 @@ fn install(
         "\n  proxy on port {}, serving {} binding{} under {}",
         bindings.http_port,
         bindings.bindings.len(),
-        if bindings.bindings.len() == 1 { "" } else { "s" },
+        if bindings.bindings.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
         bold(&format!("*.{}", bindings.tld))
     );
 
@@ -329,7 +340,10 @@ fn uninstall(path: &std::path::Path, system: bool, linux: bool) -> anyhow::Resul
 
     if linux {
         let scope: &[&str] = if system { &[] } else { &["--user"] };
-        let _ = run("systemctl", &[scope, &["disable", "--now", SYSTEMD_UNIT]].concat());
+        let _ = run(
+            "systemctl",
+            &[scope, &["disable", "--now", SYSTEMD_UNIT]].concat(),
+        );
     } else {
         let domain = if system {
             "system".to_string()
@@ -341,7 +355,10 @@ fn uninstall(path: &std::path::Path, system: bool, linux: bool) -> anyhow::Resul
 
     match std::fs::remove_file(path) {
         Ok(()) => println!("\n  removed {}\n", bold(&path.display().to_string())),
-        Err(_) => println!("\n  nothing installed at {}\n", dim(&path.display().to_string())),
+        Err(_) => println!(
+            "\n  nothing installed at {}\n",
+            dim(&path.display().to_string())
+        ),
     }
 
     if linux {
@@ -353,7 +370,10 @@ fn uninstall(path: &std::path::Path, system: bool, linux: bool) -> anyhow::Resul
 
 fn status(path: &std::path::Path, system: bool, linux: bool) -> anyhow::Result<()> {
     if !path.exists() {
-        println!("\n  not installed {}\n", dim(&format!("({})", path.display())));
+        println!(
+            "\n  not installed {}\n",
+            dim(&format!("({})", path.display()))
+        );
         return Ok(());
     }
 

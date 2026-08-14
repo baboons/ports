@@ -32,7 +32,9 @@ fn full(text: impl Into<Bytes>) -> ProxyBody {
 }
 
 fn empty() -> ProxyBody {
-    Empty::<Bytes>::new().map_err(|never| match never {}).boxed()
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 /// Shared, hot-reloadable configuration.
@@ -75,7 +77,10 @@ pub async fn watch_bindings(state: Arc<ProxyState>) {
             Ok(reloaded) => {
                 let count = reloaded.bindings.len();
                 *state.bindings.write().await = reloaded;
-                println!("  reloaded {count} binding{}", if count == 1 { "" } else { "s" });
+                println!(
+                    "  reloaded {count} binding{}",
+                    if count == 1 { "" } else { "s" }
+                );
             }
             Err(err) => eprintln!("  keeping the previous bindings: {err}"),
         }
@@ -204,18 +209,31 @@ async fn handle(
         .next()
         .unwrap_or(&host_header)
         .to_string();
-    let public_origin = if (scheme == "http" && listen_port == 80)
-        || (scheme == "https" && listen_port == 443)
-    {
-        format!("{scheme}://{public_host}")
-    } else {
-        format!("{scheme}://{public_host}:{listen_port}")
-    };
+    let public_origin =
+        if (scheme == "http" && listen_port == 80) || (scheme == "https" && listen_port == 443) {
+            format!("{scheme}://{public_host}")
+        } else {
+            format!("{scheme}://{public_host}:{listen_port}")
+        };
 
-    match forward(req, &upstream, client_ip, &host_header, scheme, listen_port, &public_origin).await
+    match forward(
+        req,
+        &upstream,
+        client_ip,
+        &host_header,
+        scheme,
+        listen_port,
+        &public_origin,
+    )
+    .await
     {
         Ok(response) => Ok(response),
-        Err(err) => Ok(upstream_unreachable_page(&upstream, &public_host, &tld, &err)),
+        Err(err) => Ok(upstream_unreachable_page(
+            &upstream,
+            &public_host,
+            &tld,
+            &err,
+        )),
     }
 }
 
@@ -248,15 +266,13 @@ async fn forward(
     let client_upgrade = upgrading.then(|| hyper::upgrade::on(&mut req));
 
     let (parts, body) = req.into_parts();
-    let mut upstream_req = Request::builder()
-        .method(parts.method.clone())
-        .uri(
-            parts
-                .uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/"),
-        );
+    let mut upstream_req = Request::builder().method(parts.method.clone()).uri(
+        parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/"),
+    );
 
     {
         let headers = upstream_req.headers_mut().expect("builder has headers");
@@ -264,7 +280,9 @@ async fn forward(
             // Hop-by-hop headers belong to our connection with the client, not
             // to the one we are about to open — except on an upgrade, where
             // Connection and Upgrade are the whole point.
-            if is_hop_by_hop(name.as_str()) && !(upgrading && matches!(name.as_str(), "connection" | "upgrade")) {
+            if is_hop_by_hop(name.as_str())
+                && !(upgrading && matches!(name.as_str(), "connection" | "upgrade"))
+            {
                 continue;
             }
             headers.insert(name, value.clone());
@@ -284,8 +302,7 @@ async fn forward(
 
         if let Some(client_upgrade) = client_upgrade {
             tokio::spawn(async move {
-                let (Ok(client), Ok(server)) =
-                    tokio::join!(client_upgrade, upstream_upgrade)
+                let (Ok(client), Ok(server)) = tokio::join!(client_upgrade, upstream_upgrade)
                 else {
                     return;
                 };

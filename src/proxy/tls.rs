@@ -185,21 +185,17 @@ impl CertStore {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &key_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ =
+                        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
                 }
                 (cert, key)
             }
         };
 
         let certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut cert_pem.as_bytes())
-                .collect::<Result<Vec<_>, _>>()?;
-        let key: PrivateKeyDer<'static> =
-            rustls_pemfile::private_key(&mut key_pem.as_bytes())?
-                .ok_or_else(|| anyhow::anyhow!("no private key in {}", key_path.display()))?;
+            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
+            .ok_or_else(|| anyhow::anyhow!("no private key in {}", key_path.display()))?;
 
         let signing_key = tokio_rustls::rustls::crypto::ring::sign::any_supported_type(&key)?;
         Ok(Arc::new(CertifiedKey::new(certs, signing_key)))

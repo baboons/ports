@@ -171,7 +171,12 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
     );
     println!();
 
-    let widest_rel = candidates.iter().map(|c| c.rel.len()).max().unwrap_or(9).max(9);
+    let widest_rel = candidates
+        .iter()
+        .map(|c| c.rel.len())
+        .max()
+        .unwrap_or(9)
+        .max(9);
     let widest_source = candidates
         .iter()
         .map(|c| c.source.map(|s| s.label().len()).unwrap_or(9))
@@ -190,8 +195,8 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
     for candidate in &candidates {
         let Some(port) = candidate.port else {
             println!(
-                "  {}  {}  {}  {}",
-                format!("{:<widest_rel$}", candidate.rel),
+                "  {:<widest_rel$}  {}  {}  {}",
+                candidate.rel,
                 gray(&format!("{:>5}", "—")),
                 gray(&format!("{:<widest_source$}", "no server")),
                 gray("skipped"),
@@ -201,13 +206,11 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
 
         let hostname = format!("{}.{}", candidate.name, bindings.tld);
         let existing = bindings.get(&candidate.name);
-        let unchanged = existing.is_some_and(|b| {
-            b.target == format!("127.0.0.1:{port}")
-        });
+        let unchanged = existing.is_some_and(|b| b.target == format!("127.0.0.1:{port}"));
 
         println!(
-            "  {}  {}  {}  {} {}",
-            format!("{:<widest_rel$}", candidate.rel),
+            "  {:<widest_rel$}  {}  {}  {} {}",
+            candidate.rel,
             bold(&format!("{port:>5}")),
             dim(&format!(
                 "{:<widest_source$}",
@@ -238,7 +241,10 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
     if args.dry_run {
         println!(
             "{}\n",
-            dim(&format!("  {} would be bound — drop --dry-run to apply", to_bind.len()))
+            dim(&format!(
+                "  {} would be bound — drop --dry-run to apply",
+                to_bind.len()
+            ))
         );
         return Ok(());
     }
@@ -258,11 +264,7 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
     }
     save_bindings(&bindings)?;
 
-    println!(
-        "  {} {} bound\n",
-        green("✓"),
-        to_bind.len()
-    );
+    println!("  {} {} bound\n", green("✓"), to_bind.len());
     Ok(())
 }
 
@@ -318,13 +320,19 @@ mod tests {
             &root.join("pnpm-workspace.yaml"),
             "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
         );
-        write(&root.join("apps/web/package.json"), r#"{"name":"@acme/web"}"#);
+        write(
+            &root.join("apps/web/package.json"),
+            r#"{"name":"@acme/web"}"#,
+        );
         write(
             &root.join("apps/api/package.json"),
             r#"{"name":"@acme/api"}"#,
         );
         write(&root.join("apps/api/.env"), "PORT=4000\n");
-        write(&root.join("packages/ui/package.json"), r#"{"name":"@acme/ui"}"#);
+        write(
+            &root.join("packages/ui/package.json"),
+            r#"{"name":"@acme/ui"}"#,
+        );
         repo
     }
 
@@ -395,7 +403,10 @@ mod tests {
         let found = candidates(&repo, &[], false);
         let ui = found.iter().find(|c| c.rel == "packages/ui").unwrap();
 
-        assert_eq!(ui.port, None, "a package with no dev server must not get one");
+        assert_eq!(
+            ui.port, None,
+            "a package with no dev server must not get one"
+        );
     }
 
     #[test]
@@ -405,8 +416,14 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         write(&root.join("package.json"), r#"{"workspaces":["apps/*"]}"#);
         // Two workspaces whose package names slugify to the same thing.
-        write(&root.join("apps/web/package.json"), r#"{"name":"@one/web"}"#);
-        write(&root.join("apps/web2/package.json"), r#"{"name":"@two/web"}"#);
+        write(
+            &root.join("apps/web/package.json"),
+            r#"{"name":"@one/web"}"#,
+        );
+        write(
+            &root.join("apps/web2/package.json"),
+            r#"{"name":"@two/web"}"#,
+        );
 
         let repo = workspace::discover(root).unwrap();
         let found = candidates(&repo, &[], false);
@@ -426,7 +443,8 @@ mod tests {
 
         let web = found.iter().find(|c| c.rel == "apps/web").unwrap();
         assert!(
-            web.name.ends_with(&format!(".{}", slugify(&repo.name).unwrap())),
+            web.name
+                .ends_with(&format!(".{}", slugify(&repo.name).unwrap())),
             "expected a repo-qualified name, got {}",
             web.name
         );

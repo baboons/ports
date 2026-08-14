@@ -53,13 +53,7 @@ fn parse_go_module(raw: &str) -> Option<String> {
     let line = raw.lines().find_map(|l| l.trim().strip_prefix("module "))?;
     let module = line.trim();
     // Module paths are URLs; the last segment is the useful label.
-    Some(
-        module
-            .rsplit('/')
-            .next()
-            .unwrap_or(module)
-            .to_string(),
-    )
+    Some(module.rsplit('/').next().unwrap_or(module).to_string())
 }
 
 fn parse_manifest(file: &str, raw: &str) -> Option<String> {
@@ -90,9 +84,7 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
             };
             let name = parse_manifest(file, &raw).or_else(|| {
                 // A manifest with no name still tells us where the project is.
-                dir.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(str::to_string)
+                dir.file_name().and_then(|n| n.to_str()).map(str::to_string)
             });
             return Some(Project {
                 name,
@@ -126,9 +118,11 @@ pub fn enrich_processes(pids: &[u32]) -> HashMap<u32, ProcessInfo> {
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&sysinfo_pids),
         true,
-        ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always).with_cwd(
-            sysinfo::UpdateKind::Always,
-        ).with_user(sysinfo::UpdateKind::Always).with_exe(sysinfo::UpdateKind::Always),
+        ProcessRefreshKind::nothing()
+            .with_cmd(sysinfo::UpdateKind::Always)
+            .with_cwd(sysinfo::UpdateKind::Always)
+            .with_user(sysinfo::UpdateKind::Always)
+            .with_exe(sysinfo::UpdateKind::Always),
     );
 
     let users = Users::new_with_refreshed_list();

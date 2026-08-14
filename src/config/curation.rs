@@ -84,16 +84,13 @@ pub fn load_curation() -> Curation {
     curation.hidden_ports.sort_unstable();
     curation.hidden_ports.dedup();
     curation.hidden_ranges.retain(|r| parse_range(r).is_some());
-    curation
-        .hidden_commands
-        .retain(|c| !c.trim().is_empty());
+    curation.hidden_commands.retain(|c| !c.trim().is_empty());
     curation
 }
 
 /// Write the rules back, pretty-printed because people hand-edit this file.
 pub fn save_curation(curation: &Curation) -> std::io::Result<()> {
-    let mut json = serde_json::to_string_pretty(curation)
-        .unwrap_or_else(|_| "{}".into());
+    let mut json = serde_json::to_string_pretty(curation).unwrap_or_else(|_| "{}".into());
     json.push('\n');
     write_atomic(&curation_path(), &json)
 }
@@ -205,7 +202,10 @@ mod tests {
     #[test]
     fn an_exact_port_rule_hides_only_that_port() {
         let curation = with_hidden(Curation::default(), 6463);
-        assert_eq!(hide_reason_for(&plain(6463), &curation), Some(HideReason::Port));
+        assert_eq!(
+            hide_reason_for(&plain(6463), &curation),
+            Some(HideReason::Port)
+        );
         assert_eq!(hide_reason_for(&plain(6464), &curation), None);
     }
 
@@ -233,7 +233,10 @@ mod tests {
         };
 
         assert_eq!(
-            hide_reason_for(&record_with_process(1, Some("Discord Helper"), None), &curation),
+            hide_reason_for(
+                &record_with_process(1, Some("Discord Helper"), None),
+                &curation
+            ),
             Some(HideReason::Command)
         );
         assert_eq!(
@@ -248,7 +251,10 @@ mod tests {
             None
         );
         // No process at all must never match, whatever the needle.
-        assert_eq!(hide_reason_for(&record_with_process(4, None, None), &curation), None);
+        assert_eq!(
+            hide_reason_for(&record_with_process(4, None, None), &curation),
+            None
+        );
     }
 
     #[test]
@@ -263,7 +269,10 @@ mod tests {
         assert!(after.hidden_ports.is_empty());
         assert_eq!(after.hidden_ranges, vec!["44000-44999".to_string()]);
         // Still hidden, but now you can be told why.
-        assert_eq!(hide_reason_for(&plain(44100), &after), Some(HideReason::Range));
+        assert_eq!(
+            hide_reason_for(&plain(44100), &after),
+            Some(HideReason::Range)
+        );
     }
 
     #[test]

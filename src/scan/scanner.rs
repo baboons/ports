@@ -17,8 +17,7 @@ use crate::scan::process::enrich_processes;
 use crate::scan::scheduler::{mark_missing, merge_record, needs_probe};
 use crate::scan::sweep::{full_range, sweep_ports, SweepOptions};
 use crate::types::{
-    now_ms, probe_address_for, DiscoveryTier, PortRecord, ProcessInfo, ScanPhase,
-    ScanProgress,
+    now_ms, probe_address_for, DiscoveryTier, PortRecord, ProcessInfo, ScanPhase, ScanProgress,
 };
 
 /// Parallel HTTP probes. Loopback probes are latency-bound, not CPU-bound, so
@@ -65,8 +64,7 @@ where
 
     // Everything we knew coming in, used both to skip probes that are still
     // fresh and to preserve first-seen history through the merge.
-    let prior: HashMap<u16, PortRecord> =
-        options.prior.into_iter().map(|r| (r.port, r)).collect();
+    let prior: HashMap<u16, PortRecord> = options.prior.into_iter().map(|r| (r.port, r)).collect();
 
     let mut records: HashMap<u16, PortRecord> = HashMap::new();
     // Ports we actually looked for, so we only mark those absent as dead.
@@ -123,7 +121,10 @@ where
 
     // --- Tier 2: the common dev-port list, for anything tier 1 could not see. ---
     let known: HashSet<u16> = records.keys().copied().collect();
-    let tier2: Vec<u16> = common_ports().into_iter().filter(|p| !known.contains(p)).collect();
+    let tier2: Vec<u16> = common_ports()
+        .into_iter()
+        .filter(|p| !known.contains(p))
+        .collect();
 
     let found_tier2 = sweep_tier(
         tier2,
@@ -381,8 +382,7 @@ async fn probe_all(
 /// it needs to find new ports.
 pub async fn refresh_known(known: Vec<PortRecord>) -> Vec<PortRecord> {
     let cancel = Arc::new(AtomicBool::new(false));
-    let records: HashMap<u16, PortRecord> =
-        known.into_iter().map(|r| (r.port, r)).collect();
+    let records: HashMap<u16, PortRecord> = known.into_iter().map(|r| (r.port, r)).collect();
     let ports: Vec<u16> = records.keys().copied().collect();
 
     let probed = probe_all(&records, &ports, cancel).await;

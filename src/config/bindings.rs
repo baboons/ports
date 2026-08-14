@@ -91,9 +91,7 @@ pub fn load_bindings_strict() -> anyhow::Result<Bindings> {
     let raw = match std::fs::read_to_string(bindings_path()) {
         Ok(raw) => raw,
         // Not existing yet is the normal first-run state, not an error.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Bindings::default())
-        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Bindings::default()),
         Err(err) => return Err(err.into()),
     };
 
@@ -156,10 +154,7 @@ pub fn normalise_name(input: &str, tld: &str) -> Option<String> {
         if label.starts_with('-') || label.ends_with('-') {
             return None;
         }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return None;
         }
     }
@@ -184,7 +179,11 @@ pub fn normalise_target(input: &str) -> Option<String> {
     }
     // `localhost` resolves to ::1 first on some setups, where a server bound
     // only to 127.0.0.1 would look down. Pin it.
-    let host = if host == "localhost" { "127.0.0.1" } else { host };
+    let host = if host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
     Some(format!("{host}:{port}"))
 }
 
@@ -256,12 +255,16 @@ mod tests {
     fn resolves_a_host_header_to_its_binding() {
         let bindings = table();
         assert_eq!(
-            bindings.resolve("myapp.localhost").map(|b| b.target.as_str()),
+            bindings
+                .resolve("myapp.localhost")
+                .map(|b| b.target.as_str()),
             Some("127.0.0.1:4000")
         );
         // Multi-level names work, which is what makes `web.acme.localhost` viable.
         assert_eq!(
-            bindings.resolve("api.myapp.localhost").map(|b| b.target.as_str()),
+            bindings
+                .resolve("api.myapp.localhost")
+                .map(|b| b.target.as_str()),
             Some("127.0.0.1:4001")
         );
     }
@@ -269,7 +272,11 @@ mod tests {
     #[test]
     fn ignores_the_port_suffix_and_header_casing() {
         let bindings = table();
-        for header in ["myapp.localhost:80", "MyApp.localhost", "MYAPP.LOCALHOST:8080"] {
+        for header in [
+            "myapp.localhost:80",
+            "MyApp.localhost",
+            "MYAPP.LOCALHOST:8080",
+        ] {
             assert!(
                 bindings.resolve(header).is_some(),
                 "should have resolved {header}"
@@ -287,8 +294,14 @@ mod tests {
 
     #[test]
     fn accepts_the_forms_people_actually_type() {
-        assert_eq!(normalise_name("myapp", "localhost").as_deref(), Some("myapp"));
-        assert_eq!(normalise_name("MyApp", "localhost").as_deref(), Some("myapp"));
+        assert_eq!(
+            normalise_name("myapp", "localhost").as_deref(),
+            Some("myapp")
+        );
+        assert_eq!(
+            normalise_name("MyApp", "localhost").as_deref(),
+            Some("myapp")
+        );
         // Typing the whole hostname must not double the suffix.
         assert_eq!(
             normalise_name("myapp.localhost", "localhost").as_deref(),
@@ -302,7 +315,15 @@ mod tests {
 
     #[test]
     fn rejects_names_that_are_not_legal_hostnames() {
-        for bad in ["", ".", "-lead", "trail-", "has space", "under_score", "a..b"] {
+        for bad in [
+            "",
+            ".",
+            "-lead",
+            "trail-",
+            "has space",
+            "under_score",
+            "a..b",
+        ] {
             assert!(
                 normalise_name(bad, "localhost").is_none(),
                 "{bad:?} should be rejected"

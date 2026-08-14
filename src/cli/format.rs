@@ -165,7 +165,10 @@ pub fn render_table(records: &[PortRecord], options: &TableOptions) -> String {
         } else {
             let ports: Vec<String> = other.iter().map(|r| r.port.to_string()).collect();
             let plural = if other.len() == 1 { "" } else { "s" };
-            let listed = truncate(&ports.join(", "), options.max_width.saturating_sub(30).max(20));
+            let listed = truncate(
+                &ports.join(", "),
+                options.max_width.saturating_sub(30).max(20),
+            );
             lines.push(dim(&format!(
                 "  {} non-HTTP listener{plural}: {listed}  {}",
                 other.len(),
@@ -239,9 +242,8 @@ fn render_rows(records: &[&PortRecord], max_width: usize) -> Vec<String> {
         })
         .collect();
 
-    let max_of = |f: &dyn Fn(&Row) -> usize, floor: usize| {
-        rows.iter().map(f).max().unwrap_or(0).max(floor)
-    };
+    let max_of =
+        |f: &dyn Fn(&Row) -> usize, floor: usize| rows.iter().map(f).max().unwrap_or(0).max(floor);
 
     let w_port = max_of(&|r| width(&r.port), 4);
     let w_protocol = max_of(&|r| width(&r.protocol), 5);
@@ -276,7 +278,10 @@ mod tests {
     fn web_record(port: u16, status: u16, title: &str) -> PortRecord {
         let mut record = PortRecord::new(port, DiscoveryTier::Lsof, "127.0.0.1", 0);
         record.protocol = Protocol::Http;
-        record.http = Some(HttpInfo { status, ..Default::default() });
+        record.http = Some(HttpInfo {
+            status,
+            ..Default::default()
+        });
         record.meta = Some(PageMeta {
             title: Some(title.into()),
             ..Default::default()

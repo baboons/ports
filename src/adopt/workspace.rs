@@ -87,17 +87,17 @@ pub fn discover(start: &Path) -> Option<Repo> {
 
     // A workspace repo's root often runs something too (a docs site, a gateway),
     // and a single-project repo is nothing but its root.
-    if patterns.is_empty() || manifest_name(&root).is_some() {
-        if !workspaces.iter().any(|w| w.dir == root) {
-            workspaces.insert(
-                0,
-                Workspace {
-                    dir: root.clone(),
-                    rel: ".".to_string(),
-                    package_name: manifest_name(&root).flatten(),
-                },
-            );
-        }
+    if (patterns.is_empty() || manifest_name(&root).is_some())
+        && !workspaces.iter().any(|w| w.dir == root)
+    {
+        workspaces.insert(
+            0,
+            Workspace {
+                dir: root.clone(),
+                rel: ".".to_string(),
+                package_name: manifest_name(&root).flatten(),
+            },
+        );
     }
 
     workspaces.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -294,7 +294,10 @@ fn normalise_relative(value: &str) -> String {
 
 /// Pull a string array out of TOML without a TOML parser.
 fn extract_toml_array(raw: &str, key: &str) -> Vec<String> {
-    let Some(start) = raw.find(&format!("{key} ")).or_else(|| raw.find(&format!("{key}="))) else {
+    let Some(start) = raw
+        .find(&format!("{key} "))
+        .or_else(|| raw.find(&format!("{key}=")))
+    else {
         return Vec::new();
     };
     let after = &raw[start..];
@@ -422,11 +425,23 @@ mod tests {
             &root.join("pnpm-workspace.yaml"),
             "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
         );
-        write(&root.join("package.json"), r#"{"name":"acme","private":true}"#);
+        write(
+            &root.join("package.json"),
+            r#"{"name":"acme","private":true}"#,
+        );
 
-        write(&root.join("apps/web/package.json"), r#"{"name":"@acme/web"}"#);
-        write(&root.join("apps/docs/package.json"), r#"{"name":"@acme/docs"}"#);
-        write(&root.join("packages/ui/package.json"), r#"{"name":"@acme/ui"}"#);
+        write(
+            &root.join("apps/web/package.json"),
+            r#"{"name":"@acme/web"}"#,
+        );
+        write(
+            &root.join("apps/docs/package.json"),
+            r#"{"name":"@acme/docs"}"#,
+        );
+        write(
+            &root.join("packages/ui/package.json"),
+            r#"{"name":"@acme/ui"}"#,
+        );
         repo
     }
 
@@ -505,8 +520,14 @@ mod tests {
     #[test]
     fn glob_expansion_skips_directories_that_are_not_packages() {
         let repo = tempfile::tempdir().unwrap();
-        write(&repo.path().join("package.json"), r#"{"workspaces":["apps/*"]}"#);
-        write(&repo.path().join("apps/real/package.json"), r#"{"name":"real"}"#);
+        write(
+            &repo.path().join("package.json"),
+            r#"{"workspaces":["apps/*"]}"#,
+        );
+        write(
+            &repo.path().join("apps/real/package.json"),
+            r#"{"name":"real"}"#,
+        );
         // A stray directory with no manifest is not a workspace.
         std::fs::create_dir_all(repo.path().join("apps/not-a-package")).unwrap();
 
@@ -527,7 +548,10 @@ mod tests {
 
         let found = discover(repo.path()).unwrap();
         assert!(
-            !found.workspaces.iter().any(|w| w.rel.contains("node_modules")),
+            !found
+                .workspaces
+                .iter()
+                .any(|w| w.rel.contains("node_modules")),
             "node_modules must not be treated as a workspace"
         );
     }

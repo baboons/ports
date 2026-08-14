@@ -1,4 +1,3 @@
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -82,7 +81,9 @@ enum Command {
     /// Bind a local domain to a port
     ///
     /// With one argument the name is inferred from the project running there.
-    #[command(after_help = "EXAMPLES:\n  ports bind myapp 4000\n  ports bind 4000\n  ports bind api.myapp 4001")]
+    #[command(
+        after_help = "EXAMPLES:\n  ports bind myapp 4000\n  ports bind 4000\n  ports bind api.myapp 4001"
+    )]
     Bind {
         /// Subdomain, or the port when given alone
         first: String,
@@ -229,9 +230,7 @@ async fn main() {
         Some(Command::Serve { http_port }) => serve(http_port).await,
         Some(Command::Domain { tld, install }) => {
             if install {
-                let tld = tld.unwrap_or_else(|| {
-                    ports::config::bindings::load_bindings().tld
-                });
+                let tld = tld.unwrap_or_else(|| ports::config::bindings::load_bindings().tld);
                 ports::cli::domain::install_resolver(&tld)
             } else {
                 ports::cli::domain::domain(tld)
@@ -334,8 +333,7 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
     // known state: skipping the sweep must make the answer cheaper, never
     // smaller. Anything carried over is flagged stale so it reads as
     // remembered rather than observed.
-    let observed: std::collections::HashSet<u16> =
-        result.records.iter().map(|r| r.port).collect();
+    let observed: std::collections::HashSet<u16> = result.records.iter().map(|r| r.port).collect();
     let mut merged: Vec<PortRecord> = cache
         .records
         .iter()
@@ -396,7 +394,11 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
 
     let mut parts = vec![
         format!("{web} web server{}", if web == 1 { "" } else { "s" }),
-        format!("{} listener{}", live.len(), if live.len() == 1 { "" } else { "s" }),
+        format!(
+            "{} listener{}",
+            live.len(),
+            if live.len() == 1 { "" } else { "s" }
+        ),
         format!("{elapsed:.1}s"),
     ];
     if !deep && !args.fast {
@@ -475,7 +477,10 @@ fn ca(action: CaActionArg) -> anyhow::Result<()> {
             }
 
             let generated = tls::generate_ca()?;
-            println!("\n  generated {}", bold(&generated.source.display().to_string()));
+            println!(
+                "\n  generated {}",
+                bold(&generated.source.display().to_string())
+            );
             println!("\n  {}", ports::cli::format::yellow("trust it:"));
             if cfg!(target_os = "macos") {
                 println!(
@@ -517,8 +522,8 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     let tld = bindings.tld.clone();
     let count = bindings.bindings.len();
 
-    let needs_dns = ports::dns::resolver::mechanism_for(&tld)
-        != ports::dns::resolver::Mechanism::None;
+    let needs_dns =
+        ports::dns::resolver::mechanism_for(&tld) != ports::dns::resolver::Mechanism::None;
 
     // Claim the ports first, while we may still have the rights to.
     let listener = match ports::proxy::bind_listener(http_port).await {
@@ -601,7 +606,10 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     if needs_dns {
         println!(
             "{}",
-            dim(&format!("  dns responder on 127.0.0.1:{}", ports::dns::DNS_PORT))
+            dim(&format!(
+                "  dns responder on 127.0.0.1:{}",
+                ports::dns::DNS_PORT
+            ))
         );
     }
     println!("{}\n", dim("  Ctrl-C to stop"));

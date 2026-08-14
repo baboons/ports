@@ -343,16 +343,17 @@ mod tests {
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(("127.0.0.1", port)).await.unwrap();
-        client.send(&query_bytes("myapp.test", TYPE_A)).await.unwrap();
+        client
+            .send(&query_bytes("myapp.test", TYPE_A))
+            .await
+            .unwrap();
 
         let mut buffer = vec![0u8; 512];
-        let size = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            client.recv(&mut buffer),
-        )
-        .await
-        .expect("responder should reply")
-        .unwrap();
+        let size =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buffer))
+                .await
+                .expect("responder should reply")
+                .unwrap();
 
         assert_eq!(&buffer[size - 4..size], &[127, 0, 0, 1]);
     }

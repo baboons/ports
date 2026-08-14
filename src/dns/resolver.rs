@@ -126,10 +126,7 @@ pub fn plan_install(tld: &str) -> Option<Install> {
             contents: mac_resolver_file(DNS_PORT),
             // macOS notices a new resolver file on its own, but flushing makes
             // it immediate rather than eventually.
-            reload: Some(vec![
-                "dscacheutil".into(),
-                "-flushcache".into(),
-            ]),
+            reload: Some(vec!["dscacheutil".into(), "-flushcache".into()]),
         }),
         Mechanism::SystemdResolved => Some(Install {
             mechanism: Mechanism::SystemdResolved,

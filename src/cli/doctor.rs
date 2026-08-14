@@ -179,7 +179,10 @@ pub fn check_ca(bindings: &Bindings) -> Health {
             "issuing from the mkcert root at {}",
             ca.source.display()
         )),
-        Some(ca) => Health::Ok(format!("issuing from our own CA at {}", ca.source.display())),
+        Some(ca) => Health::Ok(format!(
+            "issuing from our own CA at {}",
+            ca.source.display()
+        )),
         None => Health::Warn(
             "no local CA found — HTTPS will not work until you install mkcert, \
              or run `ports ca install`"
