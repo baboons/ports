@@ -140,6 +140,15 @@ enum Command {
         install: bool,
     },
 
+    /// Check every layer and report which one is broken
+    Doctor,
+
+    /// Manage the certificate authority used for HTTPS
+    Ca {
+        #[arg(value_enum, default_value = "status")]
+        action: CaActionArg,
+    },
+
     /// Install, remove or inspect the proxy service
     Service {
         #[arg(value_enum, default_value = "status")]
@@ -149,6 +158,14 @@ enum Command {
         #[arg(long)]
         user: bool,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CaActionArg {
+    /// Show which CA certificates are issued from
+    Status,
+    /// Generate our own CA, when no mkcert root exists
+    Install,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -220,6 +237,8 @@ async fn main() {
                 ports::cli::domain::domain(tld)
             }
         }
+        Some(Command::Doctor) => ports::cli::doctor::doctor().await,
+        Some(Command::Ca { action }) => ca(action),
         Some(Command::Service { action, user }) => {
             ports::cli::service::service(ports::cli::service::ServiceArgs {
                 action: action.into(),
@@ -408,6 +427,84 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ca(action: CaActionArg) -> anyhow::Result<()> {
+    use ports::proxy::tls;
+
+    match action {
+        CaActionArg::Status => {
+            match tls::find_ca() {
+                Some(found) if found.is_mkcert => {
+                    println!("\n  {}", bold("mkcert root"));
+                    println!("  {}", dim(&found.source.display().to_string()));
+                    println!(
+                        "{}\n",
+                        gray("  already trusted by this machine — nothing to install")
+                    );
+                }
+                Some(found) => {
+                    println!("\n  {}", bold("ports CA"));
+                    println!("  {}", dim(&found.source.display().to_string()));
+                    println!(
+                        "{}\n",
+                        gray("  must be trusted by the system for HTTPS to work without warnings")
+                    );
+                }
+                None => {
+                    println!("\n  {}", ports::cli::format::yellow("no local CA found"));
+                    println!(
+                        "{}",
+                        gray("  install mkcert (brew install mkcert && mkcert -install),")
+                    );
+                    println!("{}\n", gray("  or run `ports ca install` to generate one"));
+                }
+            }
+            Ok(())
+        }
+        CaActionArg::Install => {
+            if let Some(found) = tls::find_ca() {
+                if found.is_mkcert {
+                    println!(
+                        "\n  {}\n",
+                        dim(&format!(
+                            "an mkcert root already exists at {} — using that instead",
+                            found.source.display()
+                        ))
+                    );
+                    return Ok(());
+                }
+            }
+
+            let generated = tls::generate_ca()?;
+            println!("\n  generated {}", bold(&generated.source.display().to_string()));
+            println!("\n  {}", ports::cli::format::yellow("trust it:"));
+            if cfg!(target_os = "macos") {
+                println!(
+                    "{}",
+                    dim(&format!(
+                        "    sudo security add-trusted-cert -d -r trustRoot \\\n      \
+                         -k /Library/Keychains/System.keychain {}/rootCA.pem",
+                        generated.source.display()
+                    ))
+                );
+            } else {
+                println!(
+                    "{}",
+                    dim(&format!(
+                        "    sudo cp {}/rootCA.pem /usr/local/share/ca-certificates/ports.crt\n    \
+                         sudo update-ca-certificates",
+                        generated.source.display()
+                    ))
+                );
+            }
+            println!(
+                "\n{}\n",
+                gray("  Firefox keeps its own trust store; add it under Settings → Certificates")
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Run the proxy in the foreground.
 async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     let mut bindings = ports::config::bindings::load_bindings_strict()?;
@@ -416,6 +513,7 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
     }
 
     let http_port = bindings.http_port;
+    let https_port = bindings.https_port;
     let tld = bindings.tld.clone();
     let count = bindings.bindings.len();
 
@@ -442,6 +540,15 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         Err(err) => return Err(err.into()),
     };
 
+    // HTTPS only if a CA exists to issue from; a certificate nothing trusts
+    // is worse than no HTTPS, because the failure is an interstitial rather
+    // than a clean fallback.
+    let ca = ports::proxy::tls::find_ca();
+    let https = match (https_port, &ca) {
+        (Some(port), Some(_)) => Some((port, ports::proxy::bind_listener(port).await?)),
+        _ => None,
+    };
+
     let dns_socket = if needs_dns {
         Some(tokio::net::UdpSocket::bind(("127.0.0.1", ports::dns::DNS_PORT)).await?)
     } else {
@@ -462,12 +569,35 @@ async fn serve(http_port_override: Option<u16>) -> anyhow::Result<()> {
         });
     }
 
+    if let (Some((port, listener)), Some(ca)) = (https, ca) {
+        let certs = Arc::new(ports::proxy::tls::CertStore::new(ca));
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let _ = ports::proxy::serve_tls_on(listener, state, port, certs).await;
+        });
+    }
+
     println!(
         "\n  {} on port {http_port}, serving {count} binding{} under {}",
         bold("ports proxy"),
         if count == 1 { "" } else { "s" },
         bold(&format!("*.{tld}"))
     );
+    if let Some(port) = https_port {
+        match ports::proxy::tls::find_ca() {
+            Some(found) => println!(
+                "{}",
+                dim(&format!(
+                    "  https on port {port}, issuing from {}",
+                    found.source.display()
+                ))
+            ),
+            None => println!(
+                "{}",
+                gray("  https off: no local CA — install mkcert, or run `ports ca install`")
+            ),
+        }
+    }
     if needs_dns {
         println!(
             "{}",

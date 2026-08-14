@@ -2,6 +2,7 @@
 
 pub mod blocked;
 pub mod rewrite;
+pub mod tls;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -128,6 +129,46 @@ pub async fn serve_on(
                 // Required for WebSocket passthrough; without it Vite's HMR
                 // socket never establishes and the page silently stops
                 // hot-reloading.
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
+                .await;
+        });
+    }
+}
+
+/// Serve HTTPS on an already-bound listener, terminating TLS with leaves minted
+/// per hostname from the local CA.
+pub async fn serve_tls_on(
+    listener: TcpListener,
+    state: Arc<ProxyState>,
+    port: u16,
+    certs: Arc<tls::CertStore>,
+) -> anyhow::Result<()> {
+    let config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(certs);
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+    loop {
+        let Ok((stream, peer)) = listener.accept().await else {
+            continue;
+        };
+        let acceptor = acceptor.clone();
+        let state = Arc::clone(&state);
+
+        tokio::spawn(async move {
+            // A failed handshake is one client's problem — a browser that has
+            // not been told to trust the CA, most likely — not the server's.
+            let Ok(stream) = acceptor.accept(stream).await else {
+                return;
+            };
+
+            let service = service_fn(move |req| {
+                let state = Arc::clone(&state);
+                async move { handle(req, state, peer.ip(), "https", port).await }
+            });
+
+            let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades()
                 .await;
