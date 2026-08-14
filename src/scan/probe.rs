@@ -247,9 +247,18 @@ async fn fetch_once(url: &Uri, secure: bool) -> anyhow::Result<FetchOutcome> {
     let connect_host = host.trim_start_matches('[').trim_end_matches(']');
     let stream = TcpStream::connect((connect_host, port)).await?;
 
+    // Origin-form: just the path. Handing hyper the absolute URI makes it emit
+    // proxy-form (`GET http://host/ HTTP/1.1`), which is legal but routes
+    // differently on servers that match the raw target — Chrome's DevTools
+    // endpoint answers 404 to it, so we would misreport a healthy service.
+    let target = url
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+
     let request = Request::builder()
         .method("GET")
-        .uri(url)
+        .uri(target)
         .header("host", format!("{host}:{port}"))
         // Some servers content-negotiate; ask for HTML so we get a <title>.
         .header("accept", "text/html,application/xhtml+xml,*/*;q=0.8")
@@ -532,6 +541,55 @@ mod tests {
             result.meta.and_then(|m| m.title).as_deref(),
             Some("Acme")
         );
+    }
+
+    /// Capture the raw bytes of the second request a probe makes.
+    ///
+    /// The first connection is the sniff, which sends a hand-written request;
+    /// the second is the real fetch, which is the one worth pinning down.
+    #[tokio::test]
+    async fn sends_an_origin_form_target_and_exactly_one_host_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&captured);
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let sink = Arc::clone(&sink);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 4096];
+                    if let Ok(n) = socket.read(&mut buffer).await {
+                        sink.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&buffer[..n]).into_owned());
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        probe_port(port, IpAddr::from([127, 0, 0, 1])).await;
+
+        let requests = captured.lock().unwrap();
+        let fetch = requests.last().expect("a fetch request was made");
+
+        // Origin-form. Absolute-form is for proxies, and servers that route on
+        // the raw target — Chrome's DevTools endpoint among them — 404 on it.
+        assert!(
+            fetch.starts_with("GET / HTTP/1.1"),
+            "expected origin-form request line, got: {:?}",
+            fetch.lines().next()
+        );
+
+        let host_headers = fetch
+            .lines()
+            .filter(|line| line.to_lowercase().starts_with("host:"))
+            .count();
+        assert_eq!(host_headers, 1, "duplicate Host header in:\n{fetch}");
     }
 
     #[tokio::test]
