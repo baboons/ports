@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::cli::format::{bold, dim, gray, green, yellow};
-use crate::config::bindings::{load_bindings, needs_privilege};
+use crate::config::bindings::{load_bindings_from, needs_privilege};
 
 const LAUNCHD_LABEL: &str = "dev.baboons.ports";
 const SYSTEMD_UNIT: &str = "ports.service";
@@ -57,6 +57,14 @@ fn target_home() -> String {
         return format!("/home/{sudo_user}");
     }
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
+}
+
+/// The bindings file the installed service will read.
+///
+/// Derived from the same home the unit sets, so what `service install` reports
+/// is what the daemon will actually load.
+fn target_config_path() -> PathBuf {
+    PathBuf::from(target_home()).join(".config/ports/bindings.json")
 }
 
 /// Give up root, permanently, after the privileged ports are bound.
@@ -232,7 +240,12 @@ pub fn service(args: ServiceArgs) -> anyhow::Result<()> {
         anyhow::bail!("service install covers Linux (systemd) and macOS (launchd) only");
     }
 
-    let bindings = load_bindings();
+    // Deliberately the target user's config, not the invoking one's. Under
+    // sudo those differ, and it is the daemon's that matters: it is the file
+    // the service will read, and the ports in it decide whether the service
+    // needs privileges at all.
+    let bindings = load_bindings_from(&target_config_path()).unwrap_or_default();
+
     // A user agent cannot bind :80, so the choice is made by the ports the
     // user configured rather than by a flag they have to remember.
     let system = !args.user && needs_privilege(&bindings);

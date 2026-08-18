@@ -159,6 +159,15 @@ enum Command {
         install: bool,
     },
 
+    /// Show or change which interface the proxy listens on
+    ///
+    /// Loopback by default. `all` reaches it from the rest of the network.
+    #[command(after_help = "EXAMPLES:\n  ports expose\n  ports expose all\n  ports expose local")]
+    Expose {
+        /// `local`, `all`, or an address of this machine
+        address: Option<String>,
+    },
+
     /// Check every layer and report which one is broken
     Doctor,
 
@@ -275,6 +284,7 @@ async fn main() {
                 })
             }
         }
+        Some(Command::Expose { address }) => ports::cli::expose::expose(address),
         Some(Command::Doctor) => ports::cli::doctor::doctor().await,
         Some(Command::Update { check }) => update(check),
         Some(Command::Ca { action }) => ca(action),

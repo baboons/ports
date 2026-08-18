@@ -137,7 +137,21 @@ pub async fn check_proxy(bindings: &Bindings) -> Health {
             "port {port} is held by something else — `ports` will show you what"
         ));
     }
-    Health::Ok(format!("proxy answering on port {port}"))
+
+    // Naming the interface here is the difference between "it works" and
+    // spending an evening wondering why the LAN gets connection refused.
+    if bindings.is_exposed() {
+        Health::Ok(format!(
+            "proxy answering on {}:{port}, reachable from the network",
+            bindings.host
+        ))
+    } else {
+        Health::Ok(format!(
+            "proxy answering on {}:{port} — this machine only, \
+             `ports expose all` to widen it",
+            bindings.host
+        ))
+    }
 }
 
 /// Are the upstreams behind the bindings actually up?

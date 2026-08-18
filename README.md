@@ -250,10 +250,17 @@ By default the proxy listens on `127.0.0.1` and is invisible to everything else.
 To reach it from other machines — a Linux box in the corner running your dev
 services — listen wider:
 
-```jsonc
-// ~/.config/ports/bindings.json
-{ "host": "0.0.0.0", "domains": ["devbox.lan", "localhost"] }
+```bash
+ports expose all              # or an explicit address
+ports expose                  # show what it is now
+ports expose local            # back to this machine only
+sudo systemctl restart ports  # the daemon reads this at startup
 ```
+
+If a machine on the network gets *connection refused*, this is almost always
+why — `nmap` reporting the port **closed** rather than filtered means nothing is
+listening on that interface, not that a firewall dropped it. `ports doctor`
+names the interface it is bound to.
 
 Then point `devbox.lan` and `*.devbox.lan` at that machine in your router's
 DNS, or in each laptop's hosts file:

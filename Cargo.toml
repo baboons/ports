@@ -1,6 +1,6 @@
 [package]
 name = "baboons-ports"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Find the HTTP servers running on this machine, and bind them to local domains"
