@@ -14,3 +14,4 @@ pub mod dns;
 pub mod proxy;
 pub mod scan;
 pub mod types;
+pub mod update;

@@ -5,7 +5,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 use ports::cache::{load_cache, save_cache, CacheState};
-use ports::cli::format::{bold, dim, gray, render_table, TableOptions};
+use ports::cli::format::{bold, dim, gray, green, render_table, yellow, TableOptions};
 use ports::config::curation::{
     curation_path, hide_reason_for, load_curation, save_curation, with_hidden, without_hidden,
 };
@@ -162,6 +162,13 @@ enum Command {
     /// Check every layer and report which one is broken
     Doctor,
 
+    /// Install the newest release
+    Update {
+        /// Only report whether one is available
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Manage the certificate authority used for HTTPS
     Ca {
         #[arg(value_enum, default_value = "status")]
@@ -269,6 +276,7 @@ async fn main() {
             }
         }
         Some(Command::Doctor) => ports::cli::doctor::doctor().await,
+        Some(Command::Update { check }) => update(check),
         Some(Command::Ca { action }) => ca(action),
         Some(Command::Service { action, user }) => {
             ports::cli::service::service(ports::cli::service::ServiceArgs {
@@ -457,8 +465,78 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
     if !is_privileged() {
         println!("{}", gray("  Run with sudo to see other users' processes."));
     }
+
+    // Read from cache only, so the listing never waits on the network.
+    let cache = ports::update::read_cache();
+    if let Some(version) = ports::update::pending_update(cache.as_ref()) {
+        println!(
+            "{}",
+            gray(&format!("  v{version} available — run `ports update`"))
+        );
+    }
     println!();
 
+    // Refresh afterwards, at most daily, so the next run knows. Deliberately
+    // last: everything above is already printed by the time this can block.
+    if !args.json && ports::update::check_is_due(cache.as_ref(), now_ms() / 1000) {
+        ports::update::refresh_in_background();
+    }
+
+    Ok(())
+}
+
+fn update(check_only: bool) -> anyhow::Result<()> {
+    use ports::update::{self, Origin, Version};
+
+    let current = Version::current();
+    println!("\n  installed  {}", dim(&format!("v{current}")));
+
+    let latest = update::check_now()?;
+    if latest <= current {
+        println!("  latest     {}\n", bold(&format!("v{latest}")));
+        println!("{}\n", dim("  already up to date"));
+        return Ok(());
+    }
+    println!("  available  {}", bold(&format!("v{latest}")));
+
+    if check_only {
+        println!("\n{}\n", dim("  run `ports update` to install it"));
+        return Ok(());
+    }
+
+    // Replacing a binary a package manager owns leaves it convinced one
+    // version is installed while another is on disk.
+    let exe = std::env::current_exe()?;
+    if let Origin::PackageManager(name) = update::origin_of(&exe) {
+        let how = match name {
+            "Homebrew" => "brew upgrade ports",
+            "cargo" => "cargo install ports --force",
+            "npm" => "npm install -g @baboons/ports@latest",
+            _ => "your package manager",
+        };
+        println!("\n  {}", yellow(&format!("this copy is managed by {name}")));
+        println!("{}\n", dim(&format!("  update it with:  {how}")));
+        return Ok(());
+    }
+
+    println!("{}", dim("  downloading and verifying…"));
+    let download = update::download(latest)?;
+    update::replace_binary(&exe, &download.bytes)?;
+
+    println!(
+        "\n  {} {}\n",
+        green("✓"),
+        bold(&format!("v{latest} installed to {}", exe.display()))
+    );
+
+    // A running daemon is still the old binary until it is restarted.
+    if ports::config::bindings::load_bindings().bindings.is_empty() {
+        return Ok(());
+    }
+    println!(
+        "{}\n",
+        dim("  restart a running proxy to pick it up:  ports service install")
+    );
     Ok(())
 }
 

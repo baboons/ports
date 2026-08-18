@@ -130,6 +130,9 @@ pub async fn watch_ports(state: Arc<ProxyState>) {
 
         *state.records.write().await = merged;
 
+        // Cheap: it does nothing unless a day has passed since the last look.
+        tokio::task::spawn_blocking(crate::update::refresh_in_background);
+
         // Long enough to be invisible on a dev machine's load, short enough
         // that a server started a minute ago is on the index.
         tokio::time::sleep(Duration::from_secs(20)).await;

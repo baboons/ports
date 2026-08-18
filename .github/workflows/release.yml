@@ -13,12 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple silicon. macos-latest is already arm64, so this is native.
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+          # Linux amd64.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
 
@@ -30,29 +28,37 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # The only cross-compile in the matrix; the rest build natively.
-      - name: Install cross linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
+      - name: Check the tag matches the crate version
+        shell: bash
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$crate" != "$tag" ]; then
+            echo "tag $tag does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+
+      - run: cargo test --all-targets
       - run: cargo build --release --target ${{ matrix.target }}
 
-      # A single gzipped binary, not a tarball: the npm installer then needs
-      # nothing beyond node's own zlib.
+      # A single gzipped binary rather than a tarball, so the npm installer and
+      # the self-updater need nothing but a gunzip.
       - name: Package
-        run: gzip -c target/${{ matrix.target }}/release/ports > ports-${{ matrix.target }}.gz
+        shell: bash
+        run: |
+          gzip -c "target/${{ matrix.target }}/release/ports" > "ports-${{ matrix.target }}.gz"
+          shasum -a 256 "ports-${{ matrix.target }}.gz" > "ports-${{ matrix.target }}.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ports-${{ matrix.target }}
-          path: ports-${{ matrix.target }}.gz
+          path: |
+            ports-${{ matrix.target }}.gz
+            ports-${{ matrix.target }}.gz.sha256
 
   publish:
     needs: build
@@ -65,8 +71,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # One manifest the updater can fetch in a single request, rather than a
+      # sidecar file per target.
+      - name: Collect checksums
+        run: |
+          cd artifacts
+          cat ./*.sha256 | sed 's|\./||' > checksums.txt
+          rm -f ./*.sha256
+          cat checksums.txt
+
       - name: Create the release
-        run: gh release create "$GITHUB_REF_NAME" artifacts/*.gz --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -75,8 +90,8 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # The npm package is a shim that downloads the binary above, so it can
-      # only be published once the release exists.
+      # The npm package downloads the binaries above, so it can only be
+      # published once the release exists.
       - name: Publish to npm
         working-directory: npm
         run: npm publish

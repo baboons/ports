@@ -3,7 +3,7 @@
 use std::process::Command;
 
 use crate::cli::format::{bold, dim, gray, green, yellow};
-use crate::config::bindings::{load_bindings_strict, save_bindings, warn_about};
+use crate::config::bindings::{load_bindings_strict, save_bindings};
 use crate::dns::resolver::{mechanism_for, plan_install, rewrite_hosts, Mechanism};
 
 /// What `ports domain` was asked to do.
@@ -284,7 +284,7 @@ pub fn install_resolver(tld: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::config::bindings::warn_about;
 
     #[test]
     fn rejects_tlds_that_cannot_work() {

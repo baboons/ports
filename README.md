@@ -34,12 +34,37 @@ Then `http://web.localhost` reaches `localhost:3000`.
 ## Install
 
 ```bash
-cargo install ports          # from source
+cargo install ports          # from source, any platform
 brew install baboons/tap/ports
 npx @baboons/ports           # fetches a prebuilt binary
 ```
 
+Prebuilt binaries are published for **macOS arm64** and **Linux x86_64**.
+Anywhere else, `cargo install ports` builds from source — the installers say so
+rather than failing obscurely.
+
 No runtime dependencies. Nothing needs root unless you want port 80.
+
+### Updating
+
+```bash
+ports update --check    # is there a newer one?
+ports update            # install it
+```
+
+`ports` checks GitHub for a new release at most once a day, in the background,
+and mentions it in the footer of a listing. Nothing is downloaded or replaced
+until you ask — this binary can be running as a root daemon, and a self-updater
+that swaps it quietly turns a compromised release into root on your machine.
+
+Downloads are checked against the SHA-256 the release publishes and refused on
+any mismatch, so a truncated or corrupted transfer never lands as an executable.
+Worth being clear about the limit: that catches corruption, not a compromised
+release — an attacker who can publish the binary can publish the checksum too.
+
+If the copy you are running belongs to Homebrew, cargo, npm or Nix, `ports
+update` says so and gives you that tool's command instead of replacing a file
+behind its back.
 
 ## Listing
 

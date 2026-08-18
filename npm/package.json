@@ -38,8 +38,8 @@
     "linux"
   ],
   "cpu": [
-    "x64",
-    "arm64"
+    "arm64",
+    "x64"
   ],
   "publishConfig": {
     "access": "public"
