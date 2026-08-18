@@ -304,10 +304,11 @@ fn progress_line(progress: &ScanProgress, last_paint: &mut Instant) {
     }
     *last_paint = Instant::now();
 
-    let pct = if progress.total > 0 {
-        format!(" {}%", progress.scanned * 100 / progress.total)
-    } else {
-        String::new()
+    // checked_div rather than a guard: a tier with nothing to scan has no
+    // percentage to show, which is the same case as a division by zero.
+    let pct = match (progress.scanned * 100).checked_div(progress.total) {
+        Some(percent) => format!(" {percent}%"),
+        None => String::new(),
     };
     eprint!(
         "\r{}\x1b[K",

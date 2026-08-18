@@ -18,7 +18,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned rather than `stable`: a floating toolchain means a Rust release
+      # can fail CI on a lint that did not exist when the code was written,
+      # with nothing in the repo having changed. Bump this deliberately.
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
