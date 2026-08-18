@@ -198,6 +198,24 @@ fn systemd_unit(system: bool) -> anyhow::Result<String> {
         String::new()
     };
 
+    // ProtectSystem=strict makes the entire hierarchy read-only, so the
+    // daemon needs its own directories back explicitly — without these it
+    // cannot cache a scan, store a favicon, or save a binding made from the
+    // index, and all three fail silently.
+    let writable = ["config", "cache", "local/share"]
+        .iter()
+        .map(|dir| {
+            let dir = match *dir {
+                "config" => ".config/ports".to_string(),
+                "cache" => ".cache/ports".to_string(),
+                _ => ".local/share/ports".to_string(),
+            };
+            // A leading `-` so a directory that does not exist yet is ignored
+            // rather than refusing to start the service.
+            format!("ReadWritePaths=-{home}/{dir}\n")
+        })
+        .collect::<String>();
+
     Ok(format!(
         "[Unit]\n\
          Description=ports — local domain proxy\n\
@@ -214,7 +232,7 @@ fn systemd_unit(system: bool) -> anyhow::Result<String> {
          PrivateTmp=yes\n\
          ProtectSystem=strict\n\
          ProtectHome=read-only\n\
-         \n\
+         {writable}\n\
          [Install]\n\
          WantedBy={}\n",
         if system {
@@ -268,6 +286,31 @@ pub fn service(args: ServiceArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Make the daemon's directories, owned by the user it will run as.
+fn create_state_dirs() {
+    let (uid, gid, _) = target_user();
+    let home = PathBuf::from(target_home());
+
+    for relative in [".config/ports", ".cache/ports", ".local/share/ports"] {
+        let dir = home.join(relative);
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        // Under sudo these would otherwise belong to root, leaving the daemon
+        // unable to write the directories made for it.
+        #[cfg(unix)]
+        if is_root() {
+            let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok();
+            if let Some(path) = path {
+                // Safety: a valid NUL-terminated path, and a checked result.
+                unsafe {
+                    libc::chown(path.as_ptr(), uid, gid);
+                }
+            }
+        }
+    }
+}
+
 fn require_root(system: bool, action: &str) -> anyhow::Result<()> {
     if system && !is_root() {
         anyhow::bail!(
@@ -293,6 +336,10 @@ fn install(
     }
     std::fs::write(path, unit)?;
     println!("\n  wrote {}", bold(&path.display().to_string()));
+
+    // Created here, owned by the user the service runs as: ReadWritePaths can
+    // only grant access to a directory that already exists.
+    create_state_dirs();
 
     if linux {
         let scope: &[&str] = if system { &[] } else { &["--user"] };
@@ -453,6 +500,25 @@ mod tests {
         assert!(unit.contains("CapabilityBoundingSet=CAP_NET_BIND_SERVICE"));
         assert!(unit.contains("User="));
         assert!(!unit.contains("User=root"));
+    }
+
+    #[test]
+    fn the_systemd_unit_can_write_its_own_directories() {
+        // ProtectSystem=strict makes everything read-only, so without these
+        // the daemon silently cannot cache a scan, store a favicon, or save a
+        // binding made from the index.
+        let unit = systemd_unit(true).unwrap();
+        assert!(
+            unit.contains("ProtectSystem=strict"),
+            "hardening should stay"
+        );
+
+        for dir in [".config/ports", ".cache/ports", ".local/share/ports"] {
+            assert!(
+                unit.contains(&format!("ReadWritePaths=-{}/{dir}", target_home())),
+                "the daemon needs {dir} writable:\n{unit}"
+            );
+        }
     }
 
     #[test]

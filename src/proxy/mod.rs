@@ -488,7 +488,7 @@ async fn index_page(
 ) -> Response<ProxyBody> {
     let bindings = state.bindings.read().await;
     let records = state.records.read().await;
-    let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip));
+    let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip), host);
 
     // Arriving at a name nothing is bound to is not an error worth a 404 in
     // the console, but it is worth saying which name you asked for.
@@ -587,9 +587,20 @@ async fn serve_index_route(
     }
 
     if path == "/_ports/data" {
+        let host_header = req
+            .headers()
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let bindings = state.bindings.read().await;
         let records = state.records.read().await;
-        let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip));
+        let snapshot = index::snapshot(
+            &bindings,
+            &records,
+            writes_allowed_from(client_ip),
+            &host_header,
+        );
         return json(
             StatusCode::OK,
             &serde_json::to_value(&snapshot).unwrap_or_default(),

@@ -22,15 +22,37 @@ pub fn is_index_host(bindings: &Bindings, host: &str) -> bool {
     if bindings.is_bare_domain(host) {
         return true;
     }
+    // Reached by address rather than by name: there is no name to look up, so
+    // this is the index and not a hostname someone forgot to bind.
+    if is_address(host) {
+        return true;
+    }
     bindings
         .name_in(host)
         .is_some_and(|name| name == INDEX_NAME)
+}
+
+/// Is this Host header a bare IP address rather than a name?
+pub fn is_address(host: &str) -> bool {
+    let host = host.trim();
+    // An IPv6 literal in a Host header is bracketed, which also means a colon
+    // inside it is not a port separator.
+    if let Some(inner) = host.strip_prefix('[') {
+        return inner
+            .split(']')
+            .next()
+            .is_some_and(|address| address.parse::<std::net::Ipv6Addr>().is_ok());
+    }
+    let bare = host.split(':').next().unwrap_or(host);
+    bare.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 /// A row for the page: either something bound, or something merely running.
 #[derive(Serialize)]
 pub struct Row {
     pub port: u16,
+    /// What to show for the link, so it matches where the link goes.
+    pub label: String,
     /// The bound hostname, when there is one.
     pub hostname: Option<String>,
     /// The name a bind would use, for the button to pre-fill.
@@ -67,10 +89,17 @@ pub struct Snapshot {
     /// False when the request came from another machine, where changing
     /// anything is refused; the page hides its controls to match.
     pub writable: bool,
+    /// The host this page was reached on, which every link is built from.
+    pub via: String,
 }
 
 /// What to show, given the bindings and the last scan.
-pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> Snapshot {
+pub fn snapshot(
+    bindings: &Bindings,
+    records: &[PortRecord],
+    writable: bool,
+    page_host: &str,
+) -> Snapshot {
     let by_port: std::collections::HashMap<u16, &PortRecord> =
         records.iter().map(|r| (r.port, r)).collect();
 
@@ -79,6 +108,27 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> 
         String::new()
     } else {
         format!(":{}", bindings.http_port)
+    };
+
+    // Everything is linked through the host this page was opened on. Naming
+    // 127.0.0.1 would point a browser on another machine at itself, which is
+    // the one thing a link on a network-reachable page must not do.
+    let via = {
+        let host = page_host.trim();
+        let bare = match host.strip_prefix('[') {
+            // Keep an IPv6 literal bracketed and drop only the port.
+            Some(inner) => inner
+                .split(']')
+                .next()
+                .map(|address| format!("[{address}]"))
+                .unwrap_or_else(|| host.to_string()),
+            None => host.split(':').next().unwrap_or(host).to_string(),
+        };
+        if bare.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            bare
+        }
     };
 
     let mut bound = Vec::new();
@@ -99,6 +149,7 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> 
         bound.push(Row {
             port,
             url: format!("http://{hostname}{port_suffix}/"),
+            label: hostname.clone(),
             hostname: Some(hostname),
             suggested: None,
             title: record
@@ -140,7 +191,10 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> 
                 project: record.process.as_ref().and_then(|p| p.project_name.clone()),
                 framework: record.http.as_ref().and_then(|h| h.framework.clone()),
                 favicon: record.meta.as_ref().and_then(|m| m.favicon_hash.clone()),
-                url: format!("{scheme}://127.0.0.1:{}/", record.port),
+                url: format!("{scheme}://{via}:{}/", record.port),
+                // The label follows the link, so it is honest about where the
+                // click actually goes.
+                label: format!("{via}:{}", record.port),
                 up: true,
             }
         })
@@ -171,6 +225,7 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> 
         unbound,
         domains,
         writable,
+        via,
     }
 }
 
@@ -371,7 +426,7 @@ function row(r, bound){
   const icon = r.favicon
     ? `<img class=icon src="/_ports/favicon/${esc(r.favicon)}" alt="">`
     : `<span class="icon blank"></span>`;
-  const label = bound ? r.hostname : `localhost:${r.port}`;
+  const label = r.label;
   const bits = [r.project, r.framework, bound ? `:${r.port}` : null].filter(Boolean);
   const status = r.status ? `<span class=chip>${r.status}</span>` : '';
   const health = bound
@@ -529,6 +584,46 @@ mod tests {
     }
 
     #[test]
+    fn reaching_the_proxy_by_address_shows_the_index() {
+        // Browsing http://10.0.1.2/ is not a hostname anyone forgot to bind;
+        // there is no name in it to look up.
+        let bindings = Bindings::default();
+        assert!(is_index_host(&bindings, "10.0.1.2"));
+        assert!(is_index_host(&bindings, "10.0.1.2:8080"));
+        assert!(is_index_host(&bindings, "127.0.0.1"));
+        assert!(is_index_host(&bindings, "[fd00::1]"));
+        assert!(is_index_host(&bindings, "[fd00::1]:8080"));
+
+        // A name is still a name.
+        assert!(!is_index_host(&bindings, "myapp.localhost"));
+        assert!(!is_index_host(&bindings, "nas.lan"));
+    }
+
+    #[test]
+    fn links_follow_the_host_the_page_was_opened_on() {
+        let records = vec![web_record(4000, "tvarr")];
+
+        // Opened over the network: a link to 127.0.0.1 would point the
+        // browser at the machine doing the browsing.
+        let snap = snapshot(&Bindings::default(), &records, true, "10.0.1.2");
+        assert_eq!(snap.via, "10.0.1.2");
+        assert_eq!(snap.unbound[0].url, "http://10.0.1.2:4000/");
+        assert_eq!(snap.unbound[0].label, "10.0.1.2:4000");
+
+        // Opened on the machine itself, unchanged.
+        let local = snapshot(&Bindings::default(), &records, true, "ports.localhost:8080");
+        assert_eq!(local.unbound[0].url, "http://ports.localhost:4000/");
+    }
+
+    #[test]
+    fn an_ipv6_page_host_stays_bracketed_in_links() {
+        let records = vec![web_record(4000, "tvarr")];
+        let snap = snapshot(&Bindings::default(), &records, true, "[fd00::1]:8080");
+        // Unbracketed, the port would read as part of the address.
+        assert_eq!(snap.unbound[0].url, "http://[fd00::1]:4000/");
+    }
+
+    #[test]
     fn the_bare_domain_shows_the_index() {
         // Landing on http://devbox.lan/ with nothing bound there should show
         // what is available, not an error.
@@ -546,7 +641,7 @@ mod tests {
         bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
 
         let records = vec![web_record(3000, "Acme"), web_record(5173, "Vite")];
-        let snap = snapshot(&bindings, &records, true);
+        let snap = snapshot(&bindings, &records, true, "ports.localhost");
 
         assert_eq!(snap.bound.len(), 1);
         assert_eq!(snap.bound[0].hostname.as_deref(), Some("web.localhost"));
@@ -561,7 +656,7 @@ mod tests {
         let mut bindings = Bindings::default();
         bindings.upsert("gone".into(), "127.0.0.1:9999".into(), 0);
 
-        let snap = snapshot(&bindings, &[], true);
+        let snap = snapshot(&bindings, &[], true, "ports.localhost");
         assert_eq!(snap.bound.len(), 1);
         assert!(!snap.bound[0].up);
     }
@@ -575,7 +670,7 @@ mod tests {
         };
         let records = vec![web_record(80, "the proxy"), web_record(443, "the proxy")];
 
-        let snap = snapshot(&bindings, &records, true);
+        let snap = snapshot(&bindings, &records, true, "ports.localhost");
         assert!(
             snap.unbound.is_empty(),
             "binding the proxy to itself would loop forever"
@@ -802,7 +897,7 @@ mod tests {
             domains: vec!["localhost".into(), "devbox.lan".into()],
             ..Default::default()
         };
-        let snap = snapshot(&bindings, &[], true);
+        let snap = snapshot(&bindings, &[], true, "ports.localhost");
 
         let localhost = snap.domains.iter().find(|d| d.name == "localhost").unwrap();
         assert!(localhost.primary);
@@ -820,14 +915,14 @@ mod tests {
     #[test]
     fn a_read_only_snapshot_is_marked_as_such() {
         // The page hides its controls to match what the server would allow.
-        let snap = snapshot(&Bindings::default(), &[], false);
+        let snap = snapshot(&Bindings::default(), &[], false, "ports.localhost");
         assert!(!snap.writable);
-        assert!(snapshot(&Bindings::default(), &[], true).writable);
+        assert!(snapshot(&Bindings::default(), &[], true, "ports.localhost").writable);
     }
 
     #[test]
     fn the_page_escapes_untrusted_hostnames() {
-        let snap = snapshot(&Bindings::default(), &[], true);
+        let snap = snapshot(&Bindings::default(), &[], true, "ports.localhost");
         let html = render(&snap, Some("<script>alert(1)</script>.localhost"));
         assert!(!html.contains("<script>alert(1)"));
         assert!(html.contains("&lt;script&gt;"));
@@ -837,7 +932,7 @@ mod tests {
     fn the_page_inlines_its_own_assets() {
         let mut bindings = Bindings::default();
         bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
-        let html = render(&snapshot(&bindings, &[], true), None);
+        let html = render(&snapshot(&bindings, &[], true, "ports.localhost"), None);
 
         // Links to local servers are the point; loading assets from a CDN is
         // what would break this on a machine with no network.
