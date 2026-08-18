@@ -286,6 +286,113 @@ pub fn service(args: ServiceArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Which kind of service is installed, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Installed {
+    /// System-wide: root to restart it.
+    System,
+    /// Just this user's.
+    User,
+}
+
+/// Is a service installed, and of which kind?
+///
+/// Checked by looking for the unit file rather than asking the service
+/// manager, so this answers the same on a box where the daemon happens to be
+/// stopped.
+pub fn installed() -> Option<Installed> {
+    if systemd_path(true).exists() || launchd_path(true).exists() {
+        return Some(Installed::System);
+    }
+    if systemd_path(false).exists() || launchd_path(false).exists() {
+        return Some(Installed::User);
+    }
+    None
+}
+
+/// The command that would restart it, for telling someone who cannot.
+pub fn restart_command(kind: Installed) -> String {
+    let sudo = if kind == Installed::System {
+        "sudo "
+    } else {
+        ""
+    };
+    if cfg!(target_os = "linux") {
+        let scope = if kind == Installed::System {
+            ""
+        } else {
+            "--user "
+        };
+        format!("{sudo}systemctl {scope}restart {SYSTEMD_UNIT}")
+    } else if kind == Installed::System {
+        format!("sudo launchctl kickstart -k system/{LAUNCHD_LABEL}")
+    } else {
+        format!("launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
+    }
+}
+
+/// Rewrite the unit of an already-installed service.
+///
+/// The unit is generated from this binary, so replacing the binary without
+/// refreshing it can leave a unit describing an older one — which is how a
+/// daemon keeps failing in a way that was already fixed.
+pub fn refresh_unit(kind: Installed) -> anyhow::Result<()> {
+    let system = kind == Installed::System;
+    if system && !is_root() {
+        anyhow::bail!("rewriting a system unit needs root");
+    }
+
+    let linux = cfg!(target_os = "linux");
+    let (path, unit) = if linux {
+        (systemd_path(system), systemd_unit(system)?)
+    } else {
+        (launchd_path(system), launchd_plist(system)?)
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, unit)?;
+    create_state_dirs();
+
+    if linux {
+        let scope: &[&str] = if system { &[] } else { &["--user"] };
+        run("systemctl", &[scope, &["daemon-reload"]].concat())?;
+    }
+    Ok(())
+}
+
+/// Restart the installed service so it picks up a new binary.
+///
+/// A system service needs root; without it the caller is told the command
+/// rather than left with a daemon still running the old code.
+pub fn restart(kind: Installed) -> anyhow::Result<()> {
+    if kind == Installed::System && !is_root() {
+        anyhow::bail!("restarting a system service needs root");
+    }
+
+    if cfg!(target_os = "linux") {
+        let scope: &[&str] = if kind == Installed::System {
+            &[]
+        } else {
+            &["--user"]
+        };
+        run("systemctl", &[scope, &["restart", SYSTEMD_UNIT]].concat())
+    } else {
+        let domain = if kind == Installed::System {
+            "system".to_string()
+        } else {
+            format!("gui/{}", target_user().0)
+        };
+        // kickstart -k stops and starts in one step, so the port is released
+        // and reclaimed by the same command.
+        run(
+            "launchctl",
+            &["kickstart", "-k", &format!("{domain}/{LAUNCHD_LABEL}")],
+        )
+    }
+}
+
 /// Make the daemon's directories, owned by the user it will run as.
 fn create_state_dirs() {
     let (uid, gid, _) = target_user();
@@ -526,6 +633,45 @@ mod tests {
         let unit = systemd_unit(false).unwrap();
         assert!(!unit.contains("AmbientCapabilities"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn the_restart_command_matches_the_kind_installed() {
+        // A system service needs root; a user one must not ask for it.
+        let system = restart_command(Installed::System);
+        assert!(system.starts_with("sudo "), "got {system}");
+
+        let user = restart_command(Installed::User);
+        assert!(!user.contains("sudo"), "got {user}");
+
+        if cfg!(target_os = "linux") {
+            assert!(system.contains("systemctl restart ports.service"));
+            assert!(user.contains("--user restart ports.service"));
+        } else {
+            assert!(system.contains("system/dev.baboons.ports"));
+            assert!(user.contains("gui/"));
+        }
+    }
+
+    #[test]
+    fn restarting_a_system_service_without_root_reports_rather_than_pretends() {
+        // Silently doing nothing would leave the daemon on the old binary
+        // while the update claimed success.
+        if !is_root() {
+            let err = restart(Installed::System).unwrap_err();
+            assert!(err.to_string().contains("needs root"), "got {err}");
+        }
+    }
+
+    #[test]
+    fn nothing_installed_is_reported_as_nothing() {
+        // Whatever this machine has, the answer must be one of the three and
+        // must not panic looking for files that are not there.
+        let found = installed();
+        assert!(matches!(
+            found,
+            None | Some(Installed::System) | Some(Installed::User)
+        ));
     }
 
     #[test]
