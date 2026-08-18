@@ -33,15 +33,31 @@ Then `http://web.localhost` reaches `localhost:3000`.
 
 ## Install
 
+Prebuilt binaries for **macOS arm64** and **Linux x86_64** are attached to each
+[release](https://github.com/baboons/ports/releases):
+
 ```bash
-cargo install ports          # from source, any platform
-brew install baboons/tap/ports
-npx @baboons/ports           # fetches a prebuilt binary
+# Linux x86_64
+curl -fsSL https://github.com/baboons/ports/releases/latest/download/ports-x86_64-unknown-linux-gnu.gz \
+  | gunzip > ports && chmod +x ports && sudo mv ports /usr/local/bin/
+
+# macOS arm64
+curl -fsSL https://github.com/baboons/ports/releases/latest/download/ports-aarch64-apple-darwin.gz \
+  | gunzip > ports && chmod +x ports && sudo mv ports /usr/local/bin/
 ```
 
-Prebuilt binaries are published for **macOS arm64** and **Linux x86_64**.
-Anywhere else, `cargo install ports` builds from source — the installers say so
-rather than failing obscurely.
+Or through a package manager:
+
+```bash
+npx @baboons/ports              # fetches the same prebuilt binary
+cargo install baboons-ports     # builds from source, any platform
+```
+
+The crate is `baboons-ports`; the command it installs is `ports`. Note that
+plain `cargo install ports` fetches an unrelated project of the same name.
+
+Building from source needs a C compiler for `ring` — on Debian or Ubuntu,
+`sudo apt install build-essential`.
 
 No runtime dependencies. Nothing needs root unless you want port 80.
 

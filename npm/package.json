@@ -1,6 +1,6 @@
 {
   "name": "@baboons/ports",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find the HTTP servers running on this machine, and bind them to local domains",
   "bin": {
     "ports": "bin/ports"
