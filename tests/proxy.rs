@@ -15,6 +15,24 @@ use ports::proxy::{serve_http, ProxyState};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+/// A throwaway bindings file, unique per proxy.
+///
+/// Without this the write endpoints would edit the real configuration of
+/// whoever runs the suite — these tests bind and unbind for real.
+fn scratch_config() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    // One directory per test process, one file per proxy: a directory each
+    // would leave dozens behind on every run.
+    let dir = std::env::temp_dir().join(format!("ports-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir.join(format!(
+        "bindings-{}.json",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// Start the proxy on an ephemeral port with one binding pointing at `target`.
 async fn start_proxy(name: &str, target: String) -> u16 {
     // Bind first to learn the port, then hand the number to the proxy: the
@@ -31,7 +49,7 @@ async fn start_proxy(name: &str, target: String) -> u16 {
     bindings.upsert(name.to_string(), target, 0);
     let _ = &mut bindings;
 
-    let state = Arc::new(ProxyState::new(bindings));
+    let state = Arc::new(ProxyState::with_path(bindings, scratch_config()));
     tokio::spawn(async move {
         let _ = serve_http(state, port).await;
     });
@@ -567,7 +585,7 @@ async fn start_multi_domain(domains: &[&str], name: &str, target: String) -> u16
     };
     bindings.upsert(name.to_string(), target, 0);
 
-    let state = Arc::new(ProxyState::new(bindings));
+    let state = Arc::new(ProxyState::with_path(bindings, scratch_config()));
     tokio::spawn(async move {
         let _ = serve_http(state, port).await;
     });
@@ -686,4 +704,151 @@ async fn a_longer_domain_wins_over_a_shorter_one() {
 
     let response = request(proxy, "myapp.devbox.lan", "/").await;
     assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
+}
+
+// --- Managing domains from the page -----------------------------------------
+
+#[tokio::test]
+async fn a_domain_can_be_added_and_removed_from_the_page() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    let added = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/domain/add",
+            Some(&origin),
+            "application/json",
+            r#"{"domain":"devbox.lan"}"#,
+        ),
+    )
+    .await;
+    assert!(added.starts_with("HTTP/1.1 200"), "got: {added}");
+
+    // Adding it must actually change routing, not just the listing.
+    let routed = request(proxy, "myapp.devbox.lan", "/").await;
+    assert!(
+        !routed.starts_with("HTTP/1.1 404"),
+        "the new domain should route:\n{routed}"
+    );
+
+    let removed = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/domain/remove",
+            Some(&origin),
+            "application/json",
+            r#"{"domain":"devbox.lan"}"#,
+        ),
+    )
+    .await;
+    assert!(removed.starts_with("HTTP/1.1 200"), "got: {removed}");
+
+    let gone = request(proxy, "myapp.devbox.lan", "/").await;
+    assert!(gone.starts_with("HTTP/1.1 404"), "got: {gone}");
+}
+
+#[tokio::test]
+async fn the_page_cannot_remove_the_last_domain() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    // It would leave the proxy answering for nothing, the page included.
+    let response = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/domain/remove",
+            Some(&origin),
+            "application/json",
+            r#"{"domain":"localhost"}"#,
+        ),
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 400"), "got: {response}");
+    assert!(response.contains("only domain"));
+
+    // And the page is still there.
+    assert!(request(proxy, "ports.localhost", "/")
+        .await
+        .starts_with("HTTP/1.1 200"));
+}
+
+#[tokio::test]
+async fn the_page_refuses_a_domain_the_cli_would_refuse() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    for bad in ["myapp.dev", "has space", "under_score"] {
+        let response = raw(
+            proxy,
+            &post(
+                "ports.localhost",
+                "/_ports/domain/add",
+                Some(&origin),
+                "application/json",
+                &format!(r#"{{"domain":"{bad}"}}"#),
+            ),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "{bad} should have been refused, got: {response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn domain_changes_carry_the_same_guards_as_binding() {
+    let proxy = start_proxy("myapp", "127.0.0.1:9".to_string()).await;
+
+    // Cross-origin.
+    let hostile = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/domain/add",
+            Some("https://evil.example"),
+            "application/json",
+            r#"{"domain":"evil.lan"}"#,
+        ),
+    )
+    .await;
+    assert!(hostile.starts_with("HTTP/1.1 403"), "got: {hostile}");
+
+    // Form-encoded, which skips the CORS preflight.
+    let simple = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/domain/add",
+            Some(&format!("http://ports.localhost:{proxy}")),
+            "application/x-www-form-urlencoded",
+            "domain=evil.lan",
+        ),
+    )
+    .await;
+    assert!(simple.starts_with("HTTP/1.1 415"), "got: {simple}");
+
+    // Neither should have taken effect.
+    let listed = request(proxy, "ports.localhost", "/_ports/data").await;
+    assert!(
+        !listed.contains("evil.lan"),
+        "a refused domain was added anyway"
+    );
+}
+
+#[tokio::test]
+async fn the_data_endpoint_reports_the_domains() {
+    let proxy =
+        start_multi_domain(&["localhost", "devbox.lan"], "myapp", "127.0.0.1:9".into()).await;
+    let response = request(proxy, "ports.localhost", "/_ports/data").await;
+
+    assert!(response.contains("\"domains\""));
+    assert!(response.contains("devbox.lan"));
+    // The page needs to know whether to draw its controls at all.
+    assert!(response.contains("\"writable\":true"));
 }

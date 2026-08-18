@@ -3,51 +3,8 @@
 use std::process::Command;
 
 use crate::cli::format::{bold, dim, gray, green, yellow};
-use crate::config::bindings::{load_bindings_strict, save_bindings};
+use crate::config::bindings::{load_bindings_strict, save_bindings, warn_about};
 use crate::dns::resolver::{mechanism_for, plan_install, rewrite_hosts, Mechanism};
-
-/// Domains that would cause trouble, and why.
-///
-/// Judged by the last label: the HSTS preload list covers subdomains, so
-/// `myapp.dev` is forced to HTTPS exactly as `.dev` is.
-fn warn_about(domain: &str) -> Option<&'static str> {
-    let effective = domain.rsplit('.').next().unwrap_or(domain);
-    match effective {
-        // Real, HSTS-preloaded: every http:// request is force-upgraded, so
-        // plain HTTP can never work no matter what we serve.
-        "dev" | "app" | "foo" | "zip" | "mov" => {
-            Some("is a real, HSTS-preloaded TLD — browsers force HTTPS on it, so plain HTTP will never work")
-        }
-        // mDNS territory; hijacking it breaks device discovery.
-        "local" => Some("is used by mDNS/Bonjour — taking it over breaks device discovery"),
-        _ => None,
-    }
-}
-
-/// Is this a usable domain to serve under?
-///
-/// Multi-label is the normal case for a custom one — `devbox.lan`,
-/// `home.arpa` — so every label is checked rather than the whole string.
-fn is_valid_domain(domain: &str) -> bool {
-    if domain.is_empty() || domain.len() > 253 {
-        return false;
-    }
-    // An all-numeric name would be ambiguous with an address.
-    if domain
-        .split('.')
-        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()))
-    {
-        return false;
-    }
-
-    domain.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    })
-}
 
 /// What `ports domain` was asked to do.
 pub enum DomainAction {
@@ -60,17 +17,12 @@ pub enum DomainAction {
 }
 
 fn check(domain: &str) -> anyhow::Result<String> {
-    let domain = domain.trim().trim_matches('.').to_lowercase();
-    if !is_valid_domain(&domain) {
-        anyhow::bail!("'{domain}' is not a usable domain");
-    }
-    if let Some(reason) = warn_about(&domain) {
-        anyhow::bail!(
-            "{domain} {reason}.\n  \
+    crate::config::bindings::check_domain(domain).map_err(|err| {
+        anyhow::anyhow!(
+            "{err}.\n  \
              Consider .localhost (no setup at all) or .test (reserved for exactly this)."
-        );
-    }
-    Ok(domain)
+        )
+    })
 }
 
 pub fn domain(action: DomainAction) -> anyhow::Result<()> {
@@ -345,51 +297,5 @@ mod tests {
         assert!(warn_about("test").is_none());
         assert!(warn_about("localhost").is_none());
         assert!(warn_about("lo").is_none());
-    }
-
-    #[test]
-    fn accepts_the_domains_people_actually_point_at_a_box() {
-        for good in [
-            "test",
-            "localhost",
-            "lo",
-            "internal",
-            "dev-box",
-            // Multi-label is the normal shape for a custom one.
-            "devbox.lan",
-            "home.arpa",
-            "dev.internal.example",
-        ] {
-            assert!(is_valid_domain(good), "{good} should be valid");
-        }
-    }
-
-    #[test]
-    fn rejects_domains_that_are_not_hostnames() {
-        for bad in [
-            "",
-            "has space",
-            "under_score",
-            "-lead",
-            "trail-",
-            "123",
-            "a..b",
-            ".",
-            "trailing.",
-        ] {
-            assert!(!is_valid_domain(bad), "{bad} should be rejected");
-        }
-    }
-
-    #[test]
-    fn hsts_preloaded_domains_are_refused_at_any_depth() {
-        // The preload list covers subdomains, so myapp.dev is forced to HTTPS
-        // exactly as .dev is — plain HTTP could never work under either.
-        assert!(warn_about("dev").is_some());
-        assert!(warn_about("devbox.dev").is_some());
-        assert!(warn_about("anything.app").is_some());
-
-        assert!(warn_about("devbox.lan").is_none());
-        assert!(warn_about("home.arpa").is_none());
     }
 }

@@ -52,7 +52,12 @@ pub fn write_atomic(target: &Path, contents: &str) -> std::io::Result<()> {
     };
     std::fs::create_dir_all(parent)?;
 
-    let tmp = target.with_extension(format!("{}.tmp", std::process::id()));
+    // Unique per call, not per process: two threads writing at once would
+    // otherwise share a temp path, and one would rename it out from under the
+    // other mid-write.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = target.with_extension(format!("{}.{ticket}.tmp", std::process::id()));
     match std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, target)) {
         Ok(()) => Ok(()),
         Err(err) => {
@@ -88,6 +93,39 @@ mod tests {
         // Overwriting replaces cleanly rather than appending or leaving debris.
         write_atomic(&target, "{\"a\":2}").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":2}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
+    }
+
+    #[test]
+    fn concurrent_writes_do_not_collide() {
+        // Same process, many threads: a temp name keyed only on the pid would
+        // have them renaming each other's files away.
+        let dir = tempfile::tempdir().unwrap();
+        let target = std::sync::Arc::new(dir.path().join("state.json"));
+
+        let handles: Vec<_> = (0..16)
+            .map(|index| {
+                let target = std::sync::Arc::clone(&target);
+                std::thread::spawn(move || write_atomic(&target, &format!("{{\"n\":{index}}}")))
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().expect("every write should succeed");
+        }
+
+        // Whoever won, the file is one complete write, never a mixture.
+        let contents = std::fs::read_to_string(target.as_path()).unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&contents).is_ok(),
+            "left a torn file: {contents}"
+        );
 
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

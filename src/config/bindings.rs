@@ -98,6 +98,64 @@ impl Default for Bindings {
     }
 }
 
+/// Domains that would cause trouble, and why.
+///
+/// Judged by the last label: the HSTS preload list covers subdomains, so
+/// `myapp.dev` is forced to HTTPS exactly as `.dev` is.
+pub fn warn_about(domain: &str) -> Option<&'static str> {
+    let effective = domain.rsplit('.').next().unwrap_or(domain);
+    match effective {
+        // Real, HSTS-preloaded: every http:// request is force-upgraded, so
+        // plain HTTP can never work no matter what we serve.
+        "dev" | "app" | "foo" | "zip" | "mov" => {
+            Some("is a real, HSTS-preloaded TLD — browsers force HTTPS on it, so plain HTTP will never work")
+        }
+        // mDNS territory; hijacking it breaks device discovery.
+        "local" => Some("is used by mDNS/Bonjour — taking it over breaks device discovery"),
+        _ => None,
+    }
+}
+
+/// Is this a usable domain to serve under?
+///
+/// Multi-label is the normal case for a custom one — `devbox.lan`,
+/// `home.arpa` — so every label is checked rather than the whole string.
+pub fn is_valid_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    // An all-numeric name would be ambiguous with an address.
+    if domain
+        .split('.')
+        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+/// Check a domain and return it normalised, or say why not.
+///
+/// The one place the rules live, so `ports domain` and the index page cannot
+/// disagree about what is allowed.
+pub fn check_domain(domain: &str) -> Result<String, String> {
+    let domain = domain.trim().trim_matches('.').to_lowercase();
+    if !is_valid_domain(&domain) {
+        return Err(format!("'{domain}' is not a usable domain"));
+    }
+    if let Some(reason) = warn_about(&domain) {
+        return Err(format!("{domain} {reason}"));
+    }
+    Ok(domain)
+}
+
 /// Lowercase a Host header and drop its port, without cutting an IPv6
 /// literal in half.
 fn strip_port(host_header: &str) -> String {
@@ -118,7 +176,12 @@ pub fn bindings_path() -> PathBuf {
 /// would mean one hand-edit typo quietly discards every binding the user has —
 /// and the next `ports bind` would commit that loss to disk.
 pub fn load_bindings_strict() -> anyhow::Result<Bindings> {
-    let raw = match std::fs::read_to_string(bindings_path()) {
+    load_bindings_from(&bindings_path())
+}
+
+/// Read from a named path.
+pub fn load_bindings_from(path: &std::path::Path) -> anyhow::Result<Bindings> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         // Not existing yet is the normal first-run state, not an error.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Bindings::default()),
@@ -128,7 +191,7 @@ pub fn load_bindings_strict() -> anyhow::Result<Bindings> {
     let malformed = |err: serde_json::Error| {
         anyhow::anyhow!(
             "{} is not valid JSON: {err}\n  Fix it by hand, or delete it to start over.",
-            bindings_path().display()
+            path.display()
         )
     };
 
@@ -171,9 +234,18 @@ pub fn load_bindings() -> Bindings {
 
 /// Write the table back, pretty-printed because people hand-edit this file.
 pub fn save_bindings(bindings: &Bindings) -> std::io::Result<()> {
+    save_bindings_to(&bindings_path(), bindings)
+}
+
+/// Write to a named path.
+///
+/// The daemon carries its own path rather than reaching for the global one, so
+/// a test can point it somewhere harmless instead of at the running user's
+/// real configuration.
+pub fn save_bindings_to(path: &std::path::Path, bindings: &Bindings) -> std::io::Result<()> {
     let mut json = serde_json::to_string_pretty(bindings).unwrap_or_else(|_| "{}".into());
     json.push('\n');
-    write_atomic(&bindings_path(), &json)
+    write_atomic(path, &json)
 }
 
 /// Both proxy ports are unprivileged, so the daemon needs no root.
@@ -503,6 +575,60 @@ mod tests {
         };
         bindings.upsert("myapp".into(), "127.0.0.1:4000".into(), 0);
         bindings
+    }
+
+    #[test]
+    fn accepts_the_domains_people_actually_point_at_a_box() {
+        for good in [
+            "test",
+            "localhost",
+            "lo",
+            "internal",
+            "dev-box",
+            // Multi-label is the normal shape for a custom one.
+            "devbox.lan",
+            "home.arpa",
+            "dev.internal.example",
+        ] {
+            assert!(is_valid_domain(good), "{good} should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_domains_that_are_not_hostnames() {
+        for bad in [
+            "",
+            "has space",
+            "under_score",
+            "-lead",
+            "trail-",
+            "123",
+            "a..b",
+            ".",
+            "trailing.",
+        ] {
+            assert!(!is_valid_domain(bad), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn hsts_preloaded_domains_are_refused_at_any_depth() {
+        // The preload list covers subdomains, so myapp.dev is forced to HTTPS
+        // exactly as .dev is — plain HTTP could never work under either.
+        assert!(warn_about("dev").is_some());
+        assert!(warn_about("devbox.dev").is_some());
+        assert!(warn_about("anything.app").is_some());
+
+        assert!(warn_about("devbox.lan").is_none());
+        assert!(warn_about("home.arpa").is_none());
+    }
+
+    #[test]
+    fn the_shared_check_normalises_and_explains() {
+        assert_eq!(check_domain("  .DevBox.LAN. ").as_deref(), Ok("devbox.lan"));
+        // The reason comes back with the rejection, so both callers can say why.
+        assert!(check_domain("myapp.dev").unwrap_err().contains("HSTS"));
+        assert!(check_domain("has space").is_err());
     }
 
     #[test]

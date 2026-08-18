@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::bindings::{normalise_name, normalise_target, Bindings};
+use crate::config::bindings::{check_domain, normalise_name, normalise_target, Bindings};
 use crate::types::{PortRecord, Protocol};
 
 /// The subdomain the index always answers on.
@@ -45,16 +45,32 @@ pub struct Row {
     pub up: bool,
 }
 
+/// A domain the proxy answers for, and what it would take to reach it.
+#[derive(Serialize)]
+pub struct DomainRow {
+    pub name: String,
+    /// The first one: what new bindings are printed as.
+    pub primary: bool,
+    /// True when the OS resolves it without any help from us.
+    pub automatic: bool,
+    /// The hostname this page is reachable at under this domain.
+    pub index_url: String,
+}
+
 #[derive(Serialize)]
 pub struct Snapshot {
     pub tld: String,
     pub http_port: u16,
     pub bound: Vec<Row>,
     pub unbound: Vec<Row>,
+    pub domains: Vec<DomainRow>,
+    /// False when the request came from another machine, where changing
+    /// anything is refused; the page hides its controls to match.
+    pub writable: bool,
 }
 
 /// What to show, given the bindings and the last scan.
-pub fn snapshot(bindings: &Bindings, records: &[PortRecord]) -> Snapshot {
+pub fn snapshot(bindings: &Bindings, records: &[PortRecord], writable: bool) -> Snapshot {
     let by_port: std::collections::HashMap<u16, &PortRecord> =
         records.iter().map(|r| (r.port, r)).collect();
 
@@ -133,11 +149,28 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord]) -> Snapshot {
     unbound.sort_by_key(|r| r.port);
     bound.sort_by(|a, b| a.hostname.cmp(&b.hostname));
 
+    let needs_dns: std::collections::HashSet<&str> =
+        bindings.domains_needing_dns().into_iter().collect();
+
+    let domains = bindings
+        .domains
+        .iter()
+        .enumerate()
+        .map(|(index, name)| DomainRow {
+            index_url: format!("http://{INDEX_NAME}.{name}{port_suffix}/"),
+            automatic: !needs_dns.contains(name.as_str()),
+            primary: index == 0,
+            name: name.clone(),
+        })
+        .collect();
+
     Snapshot {
         tld: bindings.primary().to_string(),
         http_port: bindings.http_port,
         bound,
         unbound,
+        domains,
+        writable,
     }
 }
 
@@ -161,6 +194,11 @@ pub struct BindRequest {
 #[derive(Deserialize)]
 pub struct UnbindRequest {
     pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct DomainRequest {
+    pub domain: String,
 }
 
 /// Apply a bind from the page, with the same rules the CLI uses.
@@ -193,6 +231,54 @@ pub fn apply_unbind(bindings: &mut Bindings, request: &UnbindRequest) -> Result<
         return Err(format!("'{name}' is not bound"));
     }
     Ok(name)
+}
+
+/// Serve an extra domain, exactly as `ports domain --add` would.
+pub fn apply_add_domain(
+    bindings: &mut Bindings,
+    request: &DomainRequest,
+) -> Result<String, String> {
+    let domain = check_domain(&request.domain)?;
+    if bindings.domains.contains(&domain) {
+        return Err(format!("{domain} is already served"));
+    }
+    bindings.domains.push(domain.clone());
+    Ok(domain)
+}
+
+/// Stop serving a domain.
+pub fn apply_remove_domain(
+    bindings: &mut Bindings,
+    request: &DomainRequest,
+) -> Result<String, String> {
+    let domain = request.domain.trim().trim_matches('.').to_lowercase();
+
+    if !bindings.domains.contains(&domain) {
+        return Err(format!("{domain} is not one of the domains served"));
+    }
+    // With none left the proxy would answer for nothing at all, including the
+    // page you would be removing it from.
+    if bindings.domains.len() == 1 {
+        return Err(format!(
+            "{domain} is the only domain — add another before removing it"
+        ));
+    }
+
+    bindings.domains.retain(|d| *d != domain);
+    Ok(domain)
+}
+
+/// Make a domain canonical, adding it if it is new.
+pub fn apply_primary_domain(
+    bindings: &mut Bindings,
+    request: &DomainRequest,
+) -> Result<String, String> {
+    let domain = check_domain(&request.domain)?;
+    // The others keep serving: changing which name is canonical should not
+    // break links people already have.
+    bindings.domains.retain(|d| *d != domain);
+    bindings.domains.insert(0, domain.clone());
+    Ok(domain)
 }
 
 /// Render the page.
@@ -262,6 +348,12 @@ text-overflow:ellipsis}
 .meta{display:flex;align-items:center;gap:.5rem;flex:0 0 auto}
 .chip{background:var(--chip);border-radius:4px;padding:.1rem .4rem;font-size:.75rem;
 color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.dom{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.add{display:flex;gap:.5rem;padding:.7rem .25rem}
+.add input{flex:1;min-width:0;font:inherit;font-size:.85rem;padding:.3rem .6rem;
+border-radius:5px;border:1px solid var(--line);background:transparent;color:var(--fg)}
+.add input:focus{outline:none;border-color:var(--accent)}
+.note{color:var(--dim);font-size:.82rem;padding:.2rem .25rem 0}
 .up{color:var(--ok)}.down{color:var(--down)}
 button{font:inherit;font-size:.8rem;padding:.25rem .7rem;border-radius:5px;
 border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer}
@@ -297,8 +389,36 @@ function row(r, bound){
   </div>`;
 }
 
+function domainRow(dm, d){
+  const tag = dm.primary ? `<span class=chip>canonical</span>` : '';
+  const setup = dm.automatic
+    ? `<span class=chip>resolves itself</span>`
+    : `<span class=chip>needs DNS</span>`;
+  const actions = d.writable ? [
+    dm.primary ? '' : `<button data-primary="${esc(dm.name)}">make canonical</button>`,
+    d.domains.length > 1 ? `<button data-domrm="${esc(dm.name)}">remove</button>` : '',
+  ].join('') : '';
+
+  return `<div class=row>
+    <span class="icon blank"></span>
+    <div class=main>
+      <a class="name dom" href="${esc(dm.index_url)}">*.${esc(dm.name)}</a>
+    </div>
+    <div class=meta>${tag}${setup}${actions}</div>
+  </div>`;
+}
+
 function render(d){
   document.getElementById('app').innerHTML =
+    `<h2>Domains</h2>` +
+    d.domains.map(dm=>domainRow(dm,d)).join('') +
+    (d.writable ? `<div class=add>
+       <input id=newdomain placeholder="devbox.lan" autocomplete=off spellcheck=false>
+       <button data-domadd>serve this too</button>
+     </div>
+     <div class=note>Point it at this machine in your DNS or hosts file, or run
+       <code>sudo ports domain --install</code> to resolve it here.</div>`
+     : `<div class=note>Read-only from another machine — change these on the box itself.</div>`) +
     `<h2>Bound</h2>` +
     (d.bound.length ? d.bound.map(r=>row(r,true)).join('')
                     : `<div class=empty>Nothing bound yet.</div>`) +
@@ -334,7 +454,26 @@ async function refresh(){
   render(await res.json());
 }
 
+document.addEventListener('keydown', (event)=>{
+  // Enter in the domain box should submit it, like any other one-field form.
+  if(event.key === 'Enter' && event.target.id === 'newdomain'){
+    document.querySelector('[data-domadd]')?.click();
+  }
+});
+
 document.addEventListener('click', (event)=>{
+  const domadd = event.target.closest('[data-domadd]');
+  if(domadd){
+    const input = document.getElementById('newdomain');
+    const domain = input.value.trim();
+    if(domain) post('/_ports/domain/add', {domain}, domadd);
+    return;
+  }
+  const domrm = event.target.closest('[data-domrm]');
+  if(domrm){ post('/_ports/domain/remove', {domain: domrm.dataset.domrm}, domrm); return; }
+  const primary = event.target.closest('[data-primary]');
+  if(primary){ post('/_ports/domain/primary', {domain: primary.dataset.primary}, primary); return; }
+
   const bind = event.target.closest('[data-bind]');
   if(bind){
     const suggested = bind.dataset.name || `app${bind.dataset.bind}`;
@@ -407,7 +546,7 @@ mod tests {
         bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
 
         let records = vec![web_record(3000, "Acme"), web_record(5173, "Vite")];
-        let snap = snapshot(&bindings, &records);
+        let snap = snapshot(&bindings, &records, true);
 
         assert_eq!(snap.bound.len(), 1);
         assert_eq!(snap.bound[0].hostname.as_deref(), Some("web.localhost"));
@@ -422,7 +561,7 @@ mod tests {
         let mut bindings = Bindings::default();
         bindings.upsert("gone".into(), "127.0.0.1:9999".into(), 0);
 
-        let snap = snapshot(&bindings, &[]);
+        let snap = snapshot(&bindings, &[], true);
         assert_eq!(snap.bound.len(), 1);
         assert!(!snap.bound[0].up);
     }
@@ -436,7 +575,7 @@ mod tests {
         };
         let records = vec![web_record(80, "the proxy"), web_record(443, "the proxy")];
 
-        let snap = snapshot(&bindings, &records);
+        let snap = snapshot(&bindings, &records, true);
         assert!(
             snap.unbound.is_empty(),
             "binding the proxy to itself would loop forever"
@@ -541,8 +680,154 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_domain_uses_the_same_rules_as_the_cli() {
+        let mut bindings = Bindings::default();
+
+        let added = apply_add_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "  DevBox.LAN ".into(),
+            },
+        );
+        assert_eq!(added.as_deref(), Ok("devbox.lan"));
+        assert!(bindings.domains.contains(&"devbox.lan".to_string()));
+
+        // Same rejections the CLI gives, from the one shared check.
+        assert!(apply_add_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "myapp.dev".into()
+            }
+        )
+        .is_err());
+        assert!(apply_add_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "has space".into()
+            }
+        )
+        .is_err());
+        // Twice is a no-op, not a duplicate.
+        assert!(apply_add_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "devbox.lan".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_last_domain_cannot_be_removed() {
+        // Removing it would leave the proxy answering for nothing at all —
+        // including the page the button was on.
+        let mut bindings = Bindings::default();
+        let result = apply_remove_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "localhost".into(),
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(bindings.domains.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_domain_leaves_the_others_serving() {
+        let mut bindings = Bindings {
+            domains: vec!["localhost".into(), "devbox.lan".into()],
+            ..Default::default()
+        };
+        bindings.upsert("myapp".into(), "127.0.0.1:4000".into(), 0);
+
+        assert!(apply_remove_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "devbox.lan".into()
+            }
+        )
+        .is_ok());
+
+        assert!(bindings.resolve("myapp.localhost").is_some());
+        assert!(bindings.resolve("myapp.devbox.lan").is_none());
+
+        // Removing one that is not served says so rather than passing quietly.
+        assert!(apply_remove_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "devbox.lan".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn making_a_domain_canonical_keeps_the_others() {
+        let mut bindings = Bindings {
+            domains: vec!["localhost".into(), "devbox.lan".into()],
+            ..Default::default()
+        };
+
+        assert!(apply_primary_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "devbox.lan".into()
+            }
+        )
+        .is_ok());
+
+        assert_eq!(bindings.primary(), "devbox.lan");
+        // The old canonical keeps serving; links people have should not break.
+        assert!(bindings.domains.contains(&"localhost".to_string()));
+        assert_eq!(bindings.domains.len(), 2);
+    }
+
+    #[test]
+    fn a_domain_made_canonical_is_added_if_it_was_not_served() {
+        let mut bindings = Bindings::default();
+        assert!(apply_primary_domain(
+            &mut bindings,
+            &DomainRequest {
+                domain: "devbox.lan".into()
+            }
+        )
+        .is_ok());
+        assert_eq!(bindings.primary(), "devbox.lan");
+        assert_eq!(bindings.domains.len(), 2);
+    }
+
+    #[test]
+    fn the_snapshot_says_which_domains_need_dns_setup() {
+        let bindings = Bindings {
+            domains: vec!["localhost".into(), "devbox.lan".into()],
+            ..Default::default()
+        };
+        let snap = snapshot(&bindings, &[], true);
+
+        let localhost = snap.domains.iter().find(|d| d.name == "localhost").unwrap();
+        assert!(localhost.primary);
+        assert!(localhost.automatic, "*.localhost resolves on its own");
+
+        let lan = snap
+            .domains
+            .iter()
+            .find(|d| d.name == "devbox.lan")
+            .unwrap();
+        assert!(!lan.primary);
+        assert!(!lan.automatic, "a custom domain has to be pointed here");
+    }
+
+    #[test]
+    fn a_read_only_snapshot_is_marked_as_such() {
+        // The page hides its controls to match what the server would allow.
+        let snap = snapshot(&Bindings::default(), &[], false);
+        assert!(!snap.writable);
+        assert!(snapshot(&Bindings::default(), &[], true).writable);
+    }
+
+    #[test]
     fn the_page_escapes_untrusted_hostnames() {
-        let snap = snapshot(&Bindings::default(), &[]);
+        let snap = snapshot(&Bindings::default(), &[], true);
         let html = render(&snap, Some("<script>alert(1)</script>.localhost"));
         assert!(!html.contains("<script>alert(1)"));
         assert!(html.contains("&lt;script&gt;"));
@@ -552,7 +837,7 @@ mod tests {
     fn the_page_inlines_its_own_assets() {
         let mut bindings = Bindings::default();
         bindings.upsert("web".into(), "127.0.0.1:3000".into(), 0);
-        let html = render(&snapshot(&bindings, &[]), None);
+        let html = render(&snapshot(&bindings, &[], true), None);
 
         // Links to local servers are the point; loading assets from a CDN is
         // what would break this on a machine with no network.

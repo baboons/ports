@@ -19,7 +19,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
-use crate::config::bindings::{bindings_path, load_bindings_strict, Bindings};
+use crate::config::bindings::{bindings_path, load_bindings_from, Bindings};
 use crate::proxy::rewrite::{add_forwarded_headers, is_hop_by_hop, rewrite_location};
 
 /// A body we can return from every path, whether it came from upstream or was
@@ -43,13 +43,23 @@ pub struct ProxyState {
     pub bindings: RwLock<Bindings>,
     /// What the background scan last saw, for the index page.
     pub records: RwLock<Vec<crate::types::PortRecord>>,
+    /// The file this daemon reads and writes.
+    ///
+    /// Held rather than looked up globally so a test can point it at a
+    /// scratch file instead of the running user's real configuration.
+    pub bindings_path: std::path::PathBuf,
 }
 
 impl ProxyState {
     pub fn new(bindings: Bindings) -> Self {
+        Self::with_path(bindings, bindings_path())
+    }
+
+    pub fn with_path(bindings: Bindings, bindings_path: std::path::PathBuf) -> Self {
         Self {
             bindings: RwLock::new(bindings),
             records: RwLock::new(Vec::new()),
+            bindings_path,
         }
     }
 }
@@ -132,16 +142,13 @@ pub async fn watch_ports(state: Arc<ProxyState>) {
 /// ordinary user config, and this keeps the privileged half of the daemon out
 /// of the business of authenticating and parsing commands.
 pub async fn watch_bindings(state: Arc<ProxyState>) {
-    let mut last: Option<SystemTime> = std::fs::metadata(bindings_path())
-        .and_then(|m| m.modified())
-        .ok();
+    let path = state.bindings_path.clone();
+    let mut last: Option<SystemTime> = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let current = std::fs::metadata(bindings_path())
-            .and_then(|m| m.modified())
-            .ok();
+        let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if current == last {
             continue;
         }
@@ -149,7 +156,7 @@ pub async fn watch_bindings(state: Arc<ProxyState>) {
 
         // A half-written or mis-edited file must not take working routes down.
         // Keep serving the table we have and say why we did not swap it.
-        match load_bindings_strict() {
+        match load_bindings_from(&path) {
             Ok(reloaded) => {
                 let count = reloaded.bindings.len();
                 *state.bindings.write().await = reloaded;
@@ -291,12 +298,12 @@ async fn handle(
     }
 
     let Some(upstream) = resolved else {
-        return Ok(index_page(&state, &host_header, is_index).await);
+        return Ok(index_page(&state, &host_header, is_index, client_ip).await);
     };
     if is_index {
         // Someone bound over the reserved name; the index still wins, or there
         // would be no way back to it.
-        return Ok(index_page(&state, &host_header, true).await);
+        return Ok(index_page(&state, &host_header, true, client_ip).await);
     }
 
     // The origin as the browser knows it, for rewriting redirects back.
@@ -470,10 +477,15 @@ fn page(status: StatusCode, title: &str, body: String) -> Response<ProxyBody> {
 pub const SELF_MARKER: &str = "x-ports-proxy";
 
 /// The index: what is bound, what is running, and one click between them.
-async fn index_page(state: &Arc<ProxyState>, host: &str, canonical: bool) -> Response<ProxyBody> {
+async fn index_page(
+    state: &Arc<ProxyState>,
+    host: &str,
+    canonical: bool,
+    client_ip: IpAddr,
+) -> Response<ProxyBody> {
     let bindings = state.bindings.read().await;
     let records = state.records.read().await;
-    let snapshot = index::snapshot(&bindings, &records);
+    let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip));
 
     // Arriving at a name nothing is bound to is not an error worth a 404 in
     // the console, but it is worth saying which name you asked for.
@@ -574,14 +586,21 @@ async fn serve_index_route(
     if path == "/_ports/data" {
         let bindings = state.bindings.read().await;
         let records = state.records.read().await;
-        let snapshot = index::snapshot(&bindings, &records);
+        let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip));
         return json(
             StatusCode::OK,
             &serde_json::to_value(&snapshot).unwrap_or_default(),
         );
     }
 
-    let mutation = matches!(path, "/_ports/bind" | "/_ports/unbind");
+    let mutation = matches!(
+        path,
+        "/_ports/bind"
+            | "/_ports/unbind"
+            | "/_ports/domain/add"
+            | "/_ports/domain/remove"
+            | "/_ports/domain/primary"
+    );
     if !mutation {
         return json(
             StatusCode::NOT_FOUND,
@@ -646,19 +665,31 @@ async fn serve_index_route(
     };
 
     let mut bindings = state.bindings.write().await;
-    let outcome = if path == "/_ports/bind" {
-        serde_json::from_slice::<index::BindRequest>(&body)
+    let domain_request = |body: &[u8]| {
+        serde_json::from_slice::<index::DomainRequest>(body).map_err(|err| err.to_string())
+    };
+
+    let outcome = match path {
+        "/_ports/bind" => serde_json::from_slice::<index::BindRequest>(&body)
             .map_err(|err| err.to_string())
-            .and_then(|request| index::apply_bind(&mut bindings, &request))
-    } else {
-        serde_json::from_slice::<index::UnbindRequest>(&body)
+            .and_then(|request| index::apply_bind(&mut bindings, &request)),
+        "/_ports/unbind" => serde_json::from_slice::<index::UnbindRequest>(&body)
             .map_err(|err| err.to_string())
-            .and_then(|request| index::apply_unbind(&mut bindings, &request))
+            .and_then(|request| index::apply_unbind(&mut bindings, &request)),
+        "/_ports/domain/add" => {
+            domain_request(&body).and_then(|r| index::apply_add_domain(&mut bindings, &r))
+        }
+        "/_ports/domain/remove" => {
+            domain_request(&body).and_then(|r| index::apply_remove_domain(&mut bindings, &r))
+        }
+        _ => domain_request(&body).and_then(|r| index::apply_primary_domain(&mut bindings, &r)),
     };
 
     match outcome {
         Ok(name) => {
-            if let Err(err) = crate::config::bindings::save_bindings(&bindings) {
+            if let Err(err) =
+                crate::config::bindings::save_bindings_to(&state.bindings_path, &bindings)
+            {
                 return json(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &serde_json::json!({ "error": err.to_string() }),
@@ -740,7 +771,13 @@ mod tests {
         bindings.upsert("myapp".into(), "127.0.0.1:4000".into(), 0);
         let state = Arc::new(ProxyState::new(bindings));
 
-        let response = index_page(&state, "nope.localhost", false).await;
+        let response = index_page(
+            &state,
+            "nope.localhost",
+            false,
+            "127.0.0.1".parse().unwrap(),
+        )
+        .await;
         // The index, but still a 404: nothing is bound to what was asked for.
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
@@ -748,7 +785,13 @@ mod tests {
     #[tokio::test]
     async fn the_reserved_name_gets_the_index_and_a_200() {
         let state = Arc::new(ProxyState::new(Bindings::default()));
-        let response = index_page(&state, "ports.localhost", true).await;
+        let response = index_page(
+            &state,
+            "ports.localhost",
+            true,
+            "127.0.0.1".parse().unwrap(),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 }

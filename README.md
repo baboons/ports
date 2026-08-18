@@ -186,7 +186,10 @@ devbox.lan          ->  the index
 ```
 
 The index answers at `ports.<domain>` for every domain, and on the bare domain
-too, so a name you land on with nothing bound shows what is available.
+too, so a name you land on with nothing bound shows what is available. Domains
+can be added, removed and made canonical from that page as well as from the
+CLI — both go through the same rules, so neither accepts what the other would
+refuse.
 
 When two configured domains both match, the longer one wins: with `lan` and
 `devbox.lan` configured, `myapp.devbox.lan` is `myapp`, not `myapp.devbox`.
