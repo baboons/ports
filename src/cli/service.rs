@@ -322,7 +322,7 @@ fn install(
         } else {
             "s"
         },
-        bold(&format!("*.{}", bindings.tld))
+        bold(&format!("*.{}", bindings.primary()))
     );
 
     if system {

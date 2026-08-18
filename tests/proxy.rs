@@ -29,6 +29,7 @@ async fn start_proxy(name: &str, target: String) -> u16 {
         ..Default::default()
     };
     bindings.upsert(name.to_string(), target, 0);
+    let _ = &mut bindings;
 
     let state = Arc::new(ProxyState::new(bindings));
     tokio::spawn(async move {
@@ -548,4 +549,141 @@ async fn a_bound_hostname_still_proxies_rather_than_showing_the_index() {
 
     // The app's own /_ports/data, not ours.
     assert!(response.contains("upstream"), "got: {response}");
+}
+
+// --- Custom domains ---------------------------------------------------------
+
+/// Start a proxy serving several domains at once.
+async fn start_multi_domain(domains: &[&str], name: &str, target: String) -> u16 {
+    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let mut bindings = Bindings {
+        domains: domains.iter().map(|d| d.to_string()).collect(),
+        http_port: port,
+        https_port: None,
+        ..Default::default()
+    };
+    bindings.upsert(name.to_string(), target, 0);
+
+    let state = Arc::new(ProxyState::new(bindings));
+    tokio::spawn(async move {
+        let _ = serve_http(state, port).await;
+    });
+
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    port
+}
+
+/// An upstream that says which host it was asked for.
+async fn echoing_upstream() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 4096];
+                let n = socket.read(&mut buffer).await.unwrap_or(0);
+                let body = String::from_utf8_lossy(&buffer[..n]).replace('\r', "");
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\
+                             content-length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn a_binding_answers_under_every_configured_domain() {
+    let upstream = echoing_upstream().await;
+    let proxy = start_multi_domain(
+        &["localhost", "devbox.lan"],
+        "myapp",
+        format!("127.0.0.1:{upstream}"),
+    )
+    .await;
+
+    // The same binding, reached by the name you use on the box and the name
+    // your hosts file points at it from the rest of the network.
+    for host in ["myapp.localhost", "myapp.devbox.lan"] {
+        let response = request(proxy, host, "/").await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "{host} got: {response}"
+        );
+        // Host is preserved, so the app generates links for the name used.
+        assert!(
+            response.contains(&format!("host: {host}")),
+            "{host} was not preserved:\n{response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_domain_that_is_not_configured_does_not_route() {
+    let upstream = echoing_upstream().await;
+    let proxy = start_multi_domain(
+        &["localhost", "devbox.lan"],
+        "myapp",
+        format!("127.0.0.1:{upstream}"),
+    )
+    .await;
+
+    let response = request(proxy, "myapp.somewhere-else.lan", "/").await;
+    assert!(response.starts_with("HTTP/1.1 404"), "got: {response}");
+}
+
+#[tokio::test]
+async fn the_index_answers_under_every_configured_domain() {
+    let proxy =
+        start_multi_domain(&["localhost", "devbox.lan"], "myapp", "127.0.0.1:9".into()).await;
+
+    for host in ["ports.localhost", "ports.devbox.lan"] {
+        let response = request(proxy, host, "/").await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "{host} got: {response}"
+        );
+        assert!(response.contains("text/html"));
+    }
+}
+
+#[tokio::test]
+async fn the_bare_domain_shows_the_index_rather_than_an_error() {
+    let proxy = start_multi_domain(&["devbox.lan"], "myapp", "127.0.0.1:9".into()).await;
+
+    // Someone typing http://devbox.lan/ should see what is available.
+    let response = request(proxy, "devbox.lan", "/").await;
+    assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
+    assert!(response.contains("text/html"));
+}
+
+#[tokio::test]
+async fn a_longer_domain_wins_over_a_shorter_one() {
+    let upstream = echoing_upstream().await;
+    // Both configured: myapp.devbox.lan must be `myapp`, not `myapp.devbox`.
+    let proxy = start_multi_domain(
+        &["lan", "devbox.lan"],
+        "myapp",
+        format!("127.0.0.1:{upstream}"),
+    )
+    .await;
+
+    let response = request(proxy, "myapp.devbox.lan", "/").await;
+    assert!(response.starts_with("HTTP/1.1 200"), "got: {response}");
 }

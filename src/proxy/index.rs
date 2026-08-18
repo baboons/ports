@@ -12,10 +12,19 @@ use crate::types::{PortRecord, Protocol};
 /// The subdomain the index always answers on.
 pub const INDEX_NAME: &str = "ports";
 
-/// Is this hostname the reserved index name?
-pub fn is_index_host(host: &str, tld: &str) -> bool {
-    let host = host.split(':').next().unwrap_or(host).to_lowercase();
-    host == format!("{INDEX_NAME}.{tld}")
+/// Is this hostname the index, under any configured domain?
+///
+/// `ports.<domain>` for every domain, so the page is reachable by the same
+/// name however you got to the machine. The bare domain counts too — landing
+/// on `devbox.lan` with nothing bound there should show the index, not an
+/// error.
+pub fn is_index_host(bindings: &Bindings, host: &str) -> bool {
+    if bindings.is_bare_domain(host) {
+        return true;
+    }
+    bindings
+        .name_in(host)
+        .is_some_and(|name| name == INDEX_NAME)
 }
 
 /// A row for the page: either something bound, or something merely running.
@@ -69,7 +78,7 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord]) -> Snapshot {
         bound_ports.insert(port);
 
         let record = by_port.get(&port);
-        let hostname = binding.hostname(&bindings.tld);
+        let hostname = binding.hostname(bindings.primary());
 
         bound.push(Row {
             port,
@@ -125,7 +134,7 @@ pub fn snapshot(bindings: &Bindings, records: &[PortRecord]) -> Snapshot {
     bound.sort_by(|a, b| a.hostname.cmp(&b.hostname));
 
     Snapshot {
-        tld: bindings.tld.clone(),
+        tld: bindings.primary().to_string(),
         http_port: bindings.http_port,
         bound,
         unbound,
@@ -165,7 +174,7 @@ pub fn apply_bind(bindings: &mut Bindings, request: &BindRequest) -> Result<Stri
         return Err(format!("port {port} is the proxy itself — that would loop"));
     }
 
-    let Some(name) = normalise_name(&request.name, &bindings.tld) else {
+    let Some(name) = normalise_name(&request.name, bindings.primary()) else {
         return Err(format!("'{}' is not a valid hostname label", request.name));
     };
     if name == INDEX_NAME {
@@ -173,11 +182,11 @@ pub fn apply_bind(bindings: &mut Bindings, request: &BindRequest) -> Result<Stri
     }
 
     bindings.upsert(name.clone(), target, crate::types::now_ms());
-    Ok(format!("{name}.{}", bindings.tld))
+    Ok(format!("{name}.{}", bindings.primary()))
 }
 
 pub fn apply_unbind(bindings: &mut Bindings, request: &UnbindRequest) -> Result<String, String> {
-    let Some(name) = normalise_name(&request.name, &bindings.tld) else {
+    let Some(name) = normalise_name(&request.name, bindings.primary()) else {
         return Err(format!("'{}' is not a valid hostname label", request.name));
     };
     if !bindings.remove(&name) {
@@ -363,12 +372,33 @@ mod tests {
     }
 
     #[test]
-    fn recognises_the_reserved_index_hostname() {
-        assert!(is_index_host("ports.localhost", "localhost"));
-        assert!(is_index_host("ports.localhost:8080", "localhost"));
-        assert!(is_index_host("PORTS.LOCALHOST", "localhost"));
-        assert!(!is_index_host("myapp.localhost", "localhost"));
-        assert!(!is_index_host("ports.test", "localhost"));
+    fn recognises_the_index_under_every_configured_domain() {
+        let bindings = Bindings {
+            domains: vec!["localhost".into(), "devbox.lan".into()],
+            ..Default::default()
+        };
+
+        assert!(is_index_host(&bindings, "ports.localhost"));
+        assert!(is_index_host(&bindings, "ports.localhost:8080"));
+        assert!(is_index_host(&bindings, "PORTS.LOCALHOST"));
+        // The whole point of the list: the same name from the network too.
+        assert!(is_index_host(&bindings, "ports.devbox.lan"));
+
+        assert!(!is_index_host(&bindings, "myapp.localhost"));
+        // A domain that is not configured is nothing to do with us.
+        assert!(!is_index_host(&bindings, "ports.test"));
+    }
+
+    #[test]
+    fn the_bare_domain_shows_the_index() {
+        // Landing on http://devbox.lan/ with nothing bound there should show
+        // what is available, not an error.
+        let bindings = Bindings {
+            domains: vec!["devbox.lan".into()],
+            ..Default::default()
+        };
+        assert!(is_index_host(&bindings, "devbox.lan"));
+        assert!(is_index_host(&bindings, "devbox.lan:8080"));
     }
 
     #[test]

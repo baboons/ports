@@ -175,13 +175,19 @@ fn is_upgrade(req: &Request<Incoming>) -> bool {
 ///
 /// Separate from serving so a privileged port can be bound while we still have
 /// the rights to, and the rights given up before a single request is handled.
-pub async fn bind_listener(port: u16) -> std::io::Result<TcpListener> {
-    TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await
+pub async fn bind_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
+    let address: IpAddr = host.parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{host}' is not an IP address to listen on"),
+        )
+    })?;
+    TcpListener::bind(SocketAddr::from((address, port))).await
 }
 
 /// Bind and serve. Used by tests; the daemon binds separately.
 pub async fn serve_http(state: Arc<ProxyState>, port: u16) -> anyhow::Result<()> {
-    let listener = bind_listener(port).await?;
+    let listener = bind_listener("127.0.0.1", port).await?;
     serve_on(listener, state, port).await
 }
 
@@ -272,16 +278,16 @@ async fn handle(
         .to_string();
 
     let bindings = state.bindings.read().await;
-    let is_index = index::is_index_host(&host_header, &bindings.tld);
+    let is_index = index::is_index_host(&bindings, &host_header);
     let resolved = bindings.resolve(&host_header).map(|b| b.target.clone());
-    let tld = bindings.tld.clone();
+    let tld = bindings.primary().to_string();
     drop(bindings);
 
     // The index owns its own routes wherever it is served, which is the
     // reserved name and every hostname nothing is bound to.
     let path = req.uri().path().to_string();
     if path.starts_with("/_ports/") && (is_index || resolved.is_none()) {
-        return Ok(serve_index_route(req, &state, &path, scheme, listen_port).await);
+        return Ok(serve_index_route(req, &state, &path, scheme, listen_port, client_ip).await);
     }
 
     let Some(upstream) = resolved else {
@@ -518,6 +524,17 @@ fn origin_is_self(
     origin.eq_ignore_ascii_case(&expected)
 }
 
+/// May a request from this address change the bindings?
+///
+/// Only from the machine itself. Off-loopback the Origin check buys nothing —
+/// it defends against another *website* in a browser, and anything on the
+/// network can set a header to whatever it likes with one curl flag. So when
+/// the proxy is reachable from elsewhere the listing stays readable, but
+/// changing it is something you do on the box, with `ports bind`.
+pub fn writes_allowed_from(client_ip: IpAddr) -> bool {
+    client_ip.is_loopback()
+}
+
 fn json(status: StatusCode, body: &serde_json::Value) -> Response<ProxyBody> {
     Response::builder()
         .status(status)
@@ -534,6 +551,7 @@ async fn serve_index_route(
     path: &str,
     scheme: &'static str,
     listen_port: u16,
+    client_ip: IpAddr,
 ) -> Response<ProxyBody> {
     use crate::cache::favicons::read_favicon;
 
@@ -584,6 +602,16 @@ async fn serve_index_route(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
+
+    if !writes_allowed_from(client_ip) {
+        return json(
+            StatusCode::FORBIDDEN,
+            &serde_json::json!({
+                "error": "read-only from off this machine — bind from the machine itself, \
+                          with `ports bind`"
+            }),
+        );
+    }
 
     if !origin_is_self(&req, &host_header, scheme, listen_port) {
         return json(
@@ -690,6 +718,20 @@ mod tests {
         let escaped = html_escape("<script>alert(1)</script>");
         assert!(!escaped.contains('<'));
         assert_eq!(escaped, "&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    #[test]
+    fn only_the_machine_itself_may_change_bindings() {
+        // Loopback is the machine; anything else came over a network, where a
+        // forged Origin header costs one curl flag.
+        assert!(writes_allowed_from("127.0.0.1".parse().unwrap()));
+        assert!(writes_allowed_from("::1".parse().unwrap()));
+
+        // A LAN peer, the machine's own LAN address, and the wider internet.
+        assert!(!writes_allowed_from("192.168.1.42".parse().unwrap()));
+        assert!(!writes_allowed_from("10.0.0.5".parse().unwrap()));
+        assert!(!writes_allowed_from("8.8.8.8".parse().unwrap()));
+        assert!(!writes_allowed_from("fd00::1".parse().unwrap()));
     }
 
     #[tokio::test]

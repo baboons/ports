@@ -90,7 +90,7 @@ pub fn rewrite_hosts(existing: &str, bindings: &Bindings) -> String {
     }
 
     // Nothing of ours to write: leave the file without an empty marker block.
-    if bindings.bindings.is_empty() || bindings.tld == "localhost" {
+    if bindings.bindings.is_empty() || bindings.primary() == "localhost" {
         return kept.trim_end().to_string() + "\n";
     }
 
@@ -99,7 +99,7 @@ pub fn rewrite_hosts(existing: &str, bindings: &Bindings) -> String {
     out.push_str(HOSTS_BEGIN);
     out.push_str("\n# Managed by `ports`. Edits between these markers are overwritten.\n");
     for binding in &bindings.bindings {
-        let hostname = binding.hostname(&bindings.tld);
+        let hostname = binding.hostname(bindings.primary());
         out.push_str(&format!("127.0.0.1\t{hostname}\n::1\t\t{hostname}\n"));
     }
     out.push_str(HOSTS_END);
@@ -153,7 +153,7 @@ mod tests {
 
     fn bindings_with(tld: &str, names: &[(&str, u16)]) -> Bindings {
         let mut bindings = Bindings {
-            tld: tld.to_string(),
+            domains: vec![tld.to_string()],
             ..Default::default()
         };
         for (name, port) in names {

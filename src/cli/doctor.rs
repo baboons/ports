@@ -149,7 +149,7 @@ pub async fn check_upstreams(bindings: &Bindings) -> Health {
     let mut down = Vec::new();
     for binding in &bindings.bindings {
         if !is_reachable(&binding.target).await {
-            down.push(binding.hostname(&bindings.tld));
+            down.push(binding.hostname(bindings.primary()));
         }
     }
 
@@ -196,7 +196,7 @@ pub async fn check_end_to_end(bindings: &Bindings) -> Health {
     let Some(binding) = bindings.bindings.first() else {
         return Health::Skip("nothing bound to try".into());
     };
-    let hostname = binding.hostname(&bindings.tld);
+    let hostname = binding.hostname(bindings.primary());
 
     if !is_reachable(&binding.target).await {
         return Health::Skip(format!("{hostname} is not running, so nothing to try"));
@@ -223,15 +223,15 @@ pub async fn doctor() -> anyhow::Result<()> {
 
     println!(
         "\n  {}  ·  {} binding{}",
-        bold(&format!("*.{}", bindings.tld)),
+        bold(&format!("*.{}", bindings.primary())),
         bindings.bindings.len(),
         plural(bindings.bindings.len())
     );
     println!();
 
     let checks = vec![
-        ("resolution", check_resolution(&bindings.tld).await),
-        ("dns", check_dns_responder(&bindings.tld).await),
+        ("resolution", check_resolution(bindings.primary()).await),
+        ("dns", check_dns_responder(bindings.primary()).await),
         ("proxy", check_proxy(&bindings).await),
         ("upstreams", check_upstreams(&bindings).await),
         ("certificates", check_ca(&bindings)),

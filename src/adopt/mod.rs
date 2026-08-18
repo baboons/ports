@@ -204,7 +204,7 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
             continue;
         };
 
-        let hostname = format!("{}.{}", candidate.name, bindings.tld);
+        let hostname = format!("{}.{}", candidate.name, bindings.primary());
         let existing = bindings.get(&candidate.name);
         let unchanged = existing.is_some_and(|b| b.target == format!("127.0.0.1:{port}"));
 
@@ -257,7 +257,7 @@ pub async fn adopt(args: AdoptArgs) -> anyhow::Result<()> {
     for (name, target) in &to_bind {
         // Already normalised on the way in, but a package name can produce
         // something a hostname cannot hold.
-        let Some(name) = normalise_name(name, &bindings.tld) else {
+        let Some(name) = normalise_name(name, bindings.primary()) else {
             continue;
         };
         bindings.upsert(name, target.clone(), now_ms());

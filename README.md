@@ -163,16 +163,66 @@ no DNS server and no sudo. It is also a *trustworthy origin*, so service
 workers, `crypto.subtle`, WebAuthn and `Secure` cookies work over plain HTTP.
 
 ```bash
-ports domain              # show the current one
-ports domain test         # switch
-sudo ports domain test --install
+ports domain                       # show what is served
+ports domain test                  # make .test canonical
+ports domain --add devbox.lan      # serve this one as well
+ports domain --remove test         # stop serving it
+sudo ports domain --install        # write resolver entries where needed
 ```
 
-Any other TLD needs one resolver entry, which `--install` writes: on macOS
-`/etc/resolver/<tld>` pointing at our DNS responder on `127.0.0.1:15353`
-(`/etc/resolver` supports a `port` keyword, so the responder stays
-unprivileged); on Linux a systemd-resolved drop-in, or a managed block in
-`/etc/hosts`.
+You can serve **several domains at once**, and every binding answers under all
+of them. The first is canonical — it is the one new bindings are printed as.
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "domains": ["devbox.lan", "localhost"] }
+```
+
+```
+myapp.localhost     ->  127.0.0.1:3000     (on the machine)
+myapp.devbox.lan    ->  127.0.0.1:3000     (from anywhere pointed here)
+ports.devbox.lan    ->  the index
+devbox.lan          ->  the index
+```
+
+The index answers at `ports.<domain>` for every domain, and on the bare domain
+too, so a name you land on with nothing bound shows what is available.
+
+When two configured domains both match, the longer one wins: with `lan` and
+`devbox.lan` configured, `myapp.devbox.lan` is `myapp`, not `myapp.devbox`.
+
+Any domain other than `.localhost` has to resolve to the machine somehow. If
+your router, LAN DNS or a hosts file already points it here — which is the
+usual case for something like `devbox.lan` — there is nothing to install.
+Otherwise `--install` writes the resolver entry: on macOS `/etc/resolver/<domain>`
+pointing at our DNS responder on `127.0.0.1:15353` (`/etc/resolver` supports a
+`port` keyword, so the responder stays unprivileged); on Linux a
+systemd-resolved drop-in, or a managed block in `/etc/hosts`.
+
+### Serving the network
+
+By default the proxy listens on `127.0.0.1` and is invisible to everything else.
+To reach it from other machines — a Linux box in the corner running your dev
+services — listen wider:
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "host": "0.0.0.0", "domains": ["devbox.lan", "localhost"] }
+```
+
+Then point `devbox.lan` and `*.devbox.lan` at that machine in your router's
+DNS, or in each laptop's hosts file:
+
+```
+10.0.1.46  devbox.lan myapp.devbox.lan ports.devbox.lan
+```
+
+Two things to know before you do. The index **lists every service on the
+machine**, which is a fuller inventory than you may want on a shared network.
+And `bind`/`unbind` from the page are **refused from anywhere but the machine
+itself** — the Origin check that protects a browser is worth nothing against a
+peer that can set headers freely, so the listing stays readable from your laptop
+while changing it stays a `ports bind` on the box.
 
 `.dev`, `.app`, `.zip` and `.mov` are refused: they are real TLDs on the HSTS
 preload list, so browsers force HTTPS before the request reaches anything and

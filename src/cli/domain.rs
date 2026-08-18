@@ -6,9 +6,13 @@ use crate::cli::format::{bold, dim, gray, green, yellow};
 use crate::config::bindings::{load_bindings_strict, save_bindings};
 use crate::dns::resolver::{mechanism_for, plan_install, rewrite_hosts, Mechanism};
 
-/// TLDs that would cause trouble, and why.
-fn warn_about(tld: &str) -> Option<&'static str> {
-    match tld {
+/// Domains that would cause trouble, and why.
+///
+/// Judged by the last label: the HSTS preload list covers subdomains, so
+/// `myapp.dev` is forced to HTTPS exactly as `.dev` is.
+fn warn_about(domain: &str) -> Option<&'static str> {
+    let effective = domain.rsplit('.').next().unwrap_or(domain);
+    match effective {
         // Real, HSTS-preloaded: every http:// request is force-upgraded, so
         // plain HTTP can never work no matter what we serve.
         "dev" | "app" | "foo" | "zip" | "mov" => {
@@ -20,83 +24,174 @@ fn warn_about(tld: &str) -> Option<&'static str> {
     }
 }
 
-fn is_valid_tld(tld: &str) -> bool {
-    !tld.is_empty()
-        && tld.len() <= 63
-        && tld.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && !tld.starts_with('-')
-        && !tld.ends_with('-')
-        // An all-numeric TLD would be ambiguous with an address.
-        && !tld.chars().all(|c| c.is_ascii_digit())
-}
-
-pub fn domain(new_tld: Option<String>) -> anyhow::Result<()> {
-    let mut bindings = load_bindings_strict()?;
-
-    let Some(new_tld) = new_tld else {
-        return show(&bindings.tld);
-    };
-
-    let new_tld = new_tld.trim().trim_matches('.').to_lowercase();
-    if !is_valid_tld(&new_tld) {
-        anyhow::bail!("'{new_tld}' is not a usable top-level domain");
+/// Is this a usable domain to serve under?
+///
+/// Multi-label is the normal case for a custom one — `devbox.lan`,
+/// `home.arpa` — so every label is checked rather than the whole string.
+fn is_valid_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    // An all-numeric name would be ambiguous with an address.
+    if domain
+        .split('.')
+        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
     }
 
-    if let Some(reason) = warn_about(&new_tld) {
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+/// What `ports domain` was asked to do.
+pub enum DomainAction {
+    Show,
+    /// Make this the canonical domain, adding it if new.
+    SetPrimary(String),
+    /// Serve this as well, without changing which is canonical.
+    Add(String),
+    Remove(String),
+}
+
+fn check(domain: &str) -> anyhow::Result<String> {
+    let domain = domain.trim().trim_matches('.').to_lowercase();
+    if !is_valid_domain(&domain) {
+        anyhow::bail!("'{domain}' is not a usable domain");
+    }
+    if let Some(reason) = warn_about(&domain) {
         anyhow::bail!(
-            ".{new_tld} {reason}.\n  \
+            "{domain} {reason}.\n  \
              Consider .localhost (no setup at all) or .test (reserved for exactly this)."
         );
     }
+    Ok(domain)
+}
 
-    let old_tld = std::mem::replace(&mut bindings.tld, new_tld.clone());
-    if old_tld == new_tld {
-        println!("\n  already {}\n", bold(&format!("*.{new_tld}")));
-        return Ok(());
-    }
+pub fn domain(action: DomainAction) -> anyhow::Result<()> {
+    let mut bindings = load_bindings_strict()?;
 
-    save_bindings(&bindings)?;
+    match action {
+        DomainAction::Show => return show(&bindings),
 
-    println!(
-        "\n  {} → {}",
-        dim(&format!("*.{old_tld}")),
-        bold(&format!("*.{new_tld}"))
-    );
-    for binding in &bindings.bindings {
-        println!("    {}", green(&binding.hostname(&new_tld)));
-    }
-    println!();
+        DomainAction::SetPrimary(domain) => {
+            let domain = check(&domain)?;
+            if bindings.primary() == domain {
+                println!("\n  already {}\n", bold(&format!("*.{domain}")));
+                return Ok(());
+            }
+            let previous = bindings.primary().to_string();
 
-    // Leaving the old resolver file behind would keep sending a TLD we no
-    // longer serve at a responder that will now NXDOMAIN it.
-    if mechanism_for(&old_tld) == Mechanism::MacResolver {
-        let old_path = crate::dns::resolver::mac_resolver_path(&old_tld);
-        if old_path.exists() {
+            // The old one keeps serving: links people already have should not
+            // break because the canonical name changed.
+            bindings.domains.retain(|d| *d != domain);
+            bindings.domains.insert(0, domain.clone());
+            save_bindings(&bindings)?;
+
+            println!(
+                "\n  {} → {}",
+                dim(&format!("*.{previous}")),
+                bold(&format!("*.{domain}"))
+            );
             println!(
                 "{}",
                 gray(&format!(
-                    "  no longer needed:  sudo rm {}",
-                    old_path.display()
+                    "  *.{previous} still works — `ports domain --remove {previous}` to stop"
                 ))
             );
         }
+
+        DomainAction::Add(domain) => {
+            let domain = check(&domain)?;
+            if bindings.domains.contains(&domain) {
+                println!("\n  {} is already served\n", bold(&format!("*.{domain}")));
+                return Ok(());
+            }
+            bindings.domains.push(domain.clone());
+            save_bindings(&bindings)?;
+            println!("\n  also serving {}", bold(&format!("*.{domain}")));
+        }
+
+        DomainAction::Remove(domain) => {
+            let domain = domain.trim().trim_matches('.').to_lowercase();
+            if bindings.domains.len() == 1 && bindings.domains[0] == domain {
+                anyhow::bail!(
+                    "{domain} is the only domain — the proxy would answer for nothing.\n  \
+                     Add another first: ports domain <other>"
+                );
+            }
+            if !bindings.domains.contains(&domain) {
+                anyhow::bail!("{domain} is not one of the domains served");
+            }
+            bindings.domains.retain(|d| *d != domain);
+            save_bindings(&bindings)?;
+
+            println!("\n  no longer serving {}", bold(&format!("*.{domain}")));
+            if mechanism_for(&domain) == Mechanism::MacResolver {
+                let path = crate::dns::resolver::mac_resolver_path(&domain);
+                if path.exists() {
+                    println!(
+                        "{}",
+                        gray(&format!("  no longer needed:  sudo rm {}", path.display()))
+                    );
+                }
+            }
+            println!();
+            return Ok(());
+        }
     }
 
-    print_setup(&new_tld, &bindings)?;
+    for binding in &bindings.bindings {
+        println!("    {}", green(&binding.hostname(bindings.primary())));
+    }
+    println!();
+
+    print_setup_all(&bindings)?;
     Ok(())
 }
 
-fn show(tld: &str) -> anyhow::Result<()> {
-    println!("\n  {}", bold(&format!("*.{tld}")));
-    match mechanism_for(tld) {
-        Mechanism::None => println!(
+fn show(bindings: &crate::config::bindings::Bindings) -> anyhow::Result<()> {
+    println!();
+    for (index, domain) in bindings.domains.iter().enumerate() {
+        let note = if index == 0 { " (canonical)" } else { "" };
+        println!("  {}{}", bold(&format!("*.{domain}")), dim(note));
+    }
+
+    if bindings.is_exposed() {
+        println!(
+            "\n{}",
+            gray(&format!(
+                "  listening on {} — point these at this machine in your DNS or hosts file",
+                bindings.host
+            ))
+        );
+    }
+
+    print_setup_all(bindings)?;
+    Ok(())
+}
+
+/// Explain what still has to happen for every domain that needs it.
+fn print_setup_all(bindings: &crate::config::bindings::Bindings) -> anyhow::Result<()> {
+    let needing = bindings.domains_needing_dns();
+    if needing.is_empty() {
+        println!(
             "{}\n",
-            gray("  resolved by the OS with no setup — nothing to install")
-        ),
-        _ => {
-            let bindings = load_bindings_strict()?;
-            print_setup(tld, &bindings)?;
-        }
+            gray("  every resolver sends these to loopback already — nothing to install")
+        );
+        return Ok(());
+    }
+
+    // A domain pointed here by a hosts file or a LAN DNS server needs nothing
+    // from us; the resolver entry is only for making it resolve on this box.
+    println!();
+    for domain in needing {
+        print_setup(domain, bindings)?;
     }
     Ok(())
 }
@@ -125,7 +220,18 @@ fn print_setup(tld: &str, bindings: &crate::config::bindings::Bindings) -> anyho
             }
         }
         _ => {
-            println!("  {}", yellow("this TLD needs a resolver entry:"));
+            // A domain on a LAN is usually already pointed at the machine by
+            // the user's own DNS or hosts file, in which case there is nothing
+            // for us to install — say so before printing commands.
+            println!(
+                "  {}",
+                yellow(&format!("*.{tld} has to resolve to this machine somehow:"))
+            );
+            println!(
+                "{}",
+                dim("    already handled if your DNS or hosts file points it here")
+            );
+            println!("{}", dim("    otherwise, to resolve it on this box only:"));
             println!(
                 "{}",
                 dim(&format!(
@@ -158,7 +264,35 @@ fn print_setup(tld: &str, bindings: &crate::config::bindings::Bindings) -> anyho
     Ok(())
 }
 
-/// Write the resolver entry. Requires root; used by `ports domain --install`.
+/// Write resolver entries for every domain that needs one, or just the named
+/// one. Requires root; used by `ports domain --install`.
+pub fn install_resolvers(only: Option<&str>) -> anyhow::Result<()> {
+    let bindings = load_bindings_strict()?;
+
+    let wanted: Vec<String> = match only {
+        Some(domain) => vec![domain.trim().trim_matches('.').to_lowercase()],
+        None => bindings
+            .domains_needing_dns()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    };
+
+    if wanted.is_empty() {
+        println!(
+            "\n{}\n",
+            dim("  nothing to install — every configured domain resolves on its own")
+        );
+        return Ok(());
+    }
+
+    for domain in wanted {
+        install_resolver(&domain)?;
+    }
+    Ok(())
+}
+
+/// Write the resolver entry for one domain. Requires root.
 pub fn install_resolver(tld: &str) -> anyhow::Result<()> {
     let Some(install) = plan_install(tld) else {
         println!("\n{}\n", dim("  nothing to install for *.localhost"));
@@ -214,10 +348,24 @@ mod tests {
     }
 
     #[test]
-    fn validates_the_shape_of_a_tld() {
-        for good in ["test", "localhost", "lo", "internal", "dev-box"] {
-            assert!(is_valid_tld(good), "{good} should be valid");
+    fn accepts_the_domains_people_actually_point_at_a_box() {
+        for good in [
+            "test",
+            "localhost",
+            "lo",
+            "internal",
+            "dev-box",
+            // Multi-label is the normal shape for a custom one.
+            "devbox.lan",
+            "home.arpa",
+            "dev.internal.example",
+        ] {
+            assert!(is_valid_domain(good), "{good} should be valid");
         }
+    }
+
+    #[test]
+    fn rejects_domains_that_are_not_hostnames() {
         for bad in [
             "",
             "has space",
@@ -225,9 +373,23 @@ mod tests {
             "-lead",
             "trail-",
             "123",
-            "a.b",
+            "a..b",
+            ".",
+            "trailing.",
         ] {
-            assert!(!is_valid_tld(bad), "{bad} should be rejected");
+            assert!(!is_valid_domain(bad), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn hsts_preloaded_domains_are_refused_at_any_depth() {
+        // The preload list covers subdomains, so myapp.dev is forced to HTTPS
+        // exactly as .dev is — plain HTTP could never work under either.
+        assert!(warn_about("dev").is_some());
+        assert!(warn_about("devbox.dev").is_some());
+        assert!(warn_about("anything.app").is_some());
+
+        assert!(warn_about("devbox.lan").is_none());
+        assert!(warn_about("home.arpa").is_none());
     }
 }

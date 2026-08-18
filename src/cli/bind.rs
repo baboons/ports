@@ -173,14 +173,14 @@ pub async fn bind(name: Option<String>, target: String) -> anyhow::Result<()> {
         },
     };
 
-    let Some(name) = normalise_name(&name, &bindings.tld) else {
+    let Some(name) = normalise_name(&name, bindings.primary()) else {
         anyhow::bail!("'{name}' is not a valid hostname label");
     };
 
     bindings.upsert(name.clone(), target.clone(), now_ms());
     save_bindings(&bindings)?;
 
-    let hostname = format!("{name}.{}", bindings.tld);
+    let hostname = format!("{name}.{}", bindings.primary());
     let url = if bindings.http_port == 80 {
         format!("http://{hostname}/")
     } else {
@@ -206,18 +206,18 @@ pub async fn bind(name: Option<String>, target: String) -> anyhow::Result<()> {
 
 pub fn unbind(name: String) -> anyhow::Result<()> {
     let mut bindings = load_bindings_strict()?;
-    let Some(name) = normalise_name(&name, &bindings.tld) else {
+    let Some(name) = normalise_name(&name, bindings.primary()) else {
         anyhow::bail!("'{name}' is not a valid hostname label");
     };
 
     if !bindings.remove(&name) {
-        anyhow::bail!("'{name}.{}' is not bound", bindings.tld);
+        anyhow::bail!("'{name}.{}' is not bound", bindings.primary());
     }
     save_bindings(&bindings)?;
 
     println!(
         "\n  unbound {}\n",
-        bold(&format!("{name}.{}", bindings.tld))
+        bold(&format!("{name}.{}", bindings.primary()))
     );
     Ok(())
 }
@@ -256,12 +256,12 @@ pub async fn links() -> anyhow::Result<()> {
     let widest = bindings
         .bindings
         .iter()
-        .map(|b| b.hostname(&bindings.tld).len())
+        .map(|b| b.hostname(bindings.primary()).len())
         .max()
         .unwrap_or(0);
 
     for binding in &bindings.bindings {
-        let hostname = binding.hostname(&bindings.tld);
+        let hostname = binding.hostname(bindings.primary());
         let up = health.get(&binding.name).copied().unwrap_or(false);
         println!(
             "  {}  {}  {}",
@@ -283,7 +283,7 @@ pub fn describe(bindings: &Bindings) -> String {
     bindings
         .bindings
         .iter()
-        .map(|b| format!("{} → {}", b.hostname(&bindings.tld), b.target))
+        .map(|b| format!("{} → {}", b.hostname(bindings.primary()), b.target))
         .collect::<Vec<_>>()
         .join("\n")
 }

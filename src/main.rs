@@ -140,11 +140,21 @@ enum Command {
     ///
     /// Defaults to .localhost, which every resolver already sends to loopback.
     /// Any other TLD needs a one-time resolver entry, which --install writes.
+    #[command(after_help = "EXAMPLES:\n  ports domain\n  ports domain test\n  \
+                      ports domain --add devbox.lan\n  sudo ports domain --install")]
     Domain {
-        /// The new TLD, e.g. `test`. Omit to show the current one.
+        /// Make this the canonical domain, adding it if new
         tld: Option<String>,
 
-        /// Write the resolver entry (needs root)
+        /// Serve this domain as well, leaving the canonical one alone
+        #[arg(long, value_name = "DOMAIN", conflicts_with_all = ["tld", "remove"])]
+        add: Option<String>,
+
+        /// Stop serving this domain
+        #[arg(long, value_name = "DOMAIN", conflicts_with_all = ["tld", "add"])]
+        remove: Option<String>,
+
+        /// Write the resolver entries (needs root)
         #[arg(long)]
         install: bool,
     },
@@ -240,12 +250,22 @@ async fn main() {
             https_port,
             no_https,
         }) => serve(http_port, https_port, no_https).await,
-        Some(Command::Domain { tld, install }) => {
+        Some(Command::Domain {
+            tld,
+            add,
+            remove,
+            install,
+        }) => {
+            use ports::cli::domain::DomainAction;
             if install {
-                let tld = tld.unwrap_or_else(|| ports::config::bindings::load_bindings().tld);
-                ports::cli::domain::install_resolver(&tld)
+                ports::cli::domain::install_resolvers(tld.as_deref())
             } else {
-                ports::cli::domain::domain(tld)
+                ports::cli::domain::domain(match (tld, add, remove) {
+                    (Some(domain), _, _) => DomainAction::SetPrimary(domain),
+                    (_, Some(domain), _) => DomainAction::Add(domain),
+                    (_, _, Some(domain)) => DomainAction::Remove(domain),
+                    _ => DomainAction::Show,
+                })
             }
         }
         Some(Command::Doctor) => ports::cli::doctor::doctor().await,
@@ -541,14 +561,16 @@ async fn serve(
 
     let http_port = bindings.http_port;
     let https_port = bindings.https_port;
-    let tld = bindings.tld.clone();
+    let host = bindings.host.clone();
+    let exposed = bindings.is_exposed();
+    let tld = bindings.primary().to_string();
     let count = bindings.bindings.len();
 
     let needs_dns =
         ports::dns::resolver::mechanism_for(&tld) != ports::dns::resolver::Mechanism::None;
 
     // Claim the ports first, while we may still have the rights to.
-    let listener = match ports::proxy::bind_listener(http_port).await {
+    let listener = match ports::proxy::bind_listener(&host, http_port).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
             anyhow::bail!(
@@ -573,7 +595,7 @@ async fn serve(
     let ca = ports::proxy::tls::find_ca();
     let mut https_note: Option<String> = None;
     let https = match (https_port, &ca) {
-        (Some(port), Some(_)) => match ports::proxy::bind_listener(port).await {
+        (Some(port), Some(_)) => match ports::proxy::bind_listener(&host, port).await {
             Ok(listener) => Some((port, listener)),
             // Losing TLS is a degradation; losing the proxy is an outage. Say
             // what happened and carry on serving HTTP, which is the half
@@ -667,6 +689,19 @@ async fn serve(
             ports::proxy::index::INDEX_NAME
         ))
     );
+    if exposed {
+        println!(
+            "{}",
+            gray(&format!(
+                "  listening on {host} — reachable from the network, and the index \
+                 lists every service on this machine"
+            ))
+        );
+        println!(
+            "{}",
+            gray("  bind and unbind are refused from off this machine")
+        );
+    }
     println!("{}\n", dim("  Ctrl-C to stop"));
 
     ports::proxy::serve_on(listener, state, http_port).await
