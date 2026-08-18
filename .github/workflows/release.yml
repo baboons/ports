@@ -59,10 +59,15 @@ jobs:
       - name: Confirm the Linux build is static
         if: endsWith(matrix.target, '-musl')
         run: |
-          file "target/${{ matrix.target }}/release/ports"
-          if ldd "target/${{ matrix.target }}/release/ports" 2>&1 | grep -qv "not a dynamic executable"; then
-            echo "expected a statically linked binary" >&2
-            ldd "target/${{ matrix.target }}/release/ports" >&2
+          binary="target/${{ matrix.target }}/release/ports"
+          file "$binary"
+          # A shared-library dependency shows up as a `libfoo.so => /path`
+          # line. Matching on that rather than on ldd's wording for a static
+          # binary, which is "statically linked" here and "not a dynamic
+          # executable" elsewhere depending on version and binary type.
+          if ldd "$binary" 2>&1 | grep -q "=>"; then
+            echo "expected a statically linked binary, but it has shared deps:" >&2
+            ldd "$binary" >&2
             exit 1
           fi
 
