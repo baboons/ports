@@ -1,0 +1,66 @@
+[package]
+name = "ports"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Find the HTTP servers running on this machine, and bind them to local domains"
+license = "MIT"
+authors = ["Johan"]
+repository = "https://github.com/baboons/ports"
+homepage = "https://github.com/baboons/ports#readme"
+keywords = ["ports", "localhost", "proxy", "dev-server", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "ports"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ports"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "fs", "process", "signal", "sync"] }
+clap = { version = "4.6", features = ["derive"] }
+
+hyper = { version = "1.11", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# `ring` rather than the default aws-lc-rs: the latter compiles C through
+# cmake, which turns a `cargo install` into a toolchain hunt on machines that
+# have no business needing one.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
+x509-parser = "0.18"
+
+netstat2 = "0.11"
+# 0.39 raised its MSRV to 1.95; 0.38 gives us the same process API on 1.88+.
+sysinfo = "0.38"
+libc = "0.2"
+
+# html5ever's tokenizer, via scraper's CSS-selector API. `tl` is faster but
+# silently drops any tag carrying an unquoted attribute value (`href=/a.png`),
+# which loses real favicons and titles on hand-written pages.
+scraper = { version = "0.27", default-features = false, features = ["main"] }
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+owo-colors = "4"
+anyhow = "1"
+sha2 = "0.11.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+
+[profile.release]
+# A CLI people run dozens of times a day: favour a small, fast binary over
+# incremental build speed, which only matters to us.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

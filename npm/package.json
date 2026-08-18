@@ -1,0 +1,47 @@
+{
+  "name": "@baboons/ports",
+  "version": "0.2.0",
+  "description": "Find the HTTP servers running on this machine, and bind them to local domains",
+  "bin": {
+    "ports": "bin/ports"
+  },
+  "files": [
+    "bin/ports",
+    "install.js"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "keywords": [
+    "ports",
+    "localhost",
+    "proxy",
+    "local-domains",
+    "dev-server",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Johan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baboons/ports.git"
+  },
+  "homepage": "https://github.com/baboons/ports#readme",
+  "bugs": {
+    "url": "https://github.com/baboons/ports/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

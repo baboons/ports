@@ -1,259 +1,352 @@
 # ports
 
-Find every HTTP/HTTPS server running on this machine, with titles, favicons and
-the project each one belongs to.
+Find every HTTP server running on this machine, and give them names.
 
 ```
-$ ports ls
+$ ports
 
-  80     http   502  502 Bad Gateway                        nginx          nginx
-  3000   http   200  Acme Dashboard        acme-web (node)  Next.js
+  80     http   200  Acme Dashboard        acme-web (node)  Next.js
+  4000   http   200  Acme API              acme-api         Express
   5173   http   200  Vite + React          storefront       Vite
   18789  http   200  OpenClaw Control      openclaw-gateway
 
   4 non-HTTP listeners: 7265, 8021, 44438, 52259  (--all to show)
 
-  8 web servers · 12 listeners · 5.9s
+  4 web servers · 8 listeners · 1.6s
 ```
+
+```
+$ ports adopt
+
+  acme  ·  turborepo  ·  5 workspaces
+
+  workspace     port  source     domain
+  apps/api      4000  running    api.localhost
+  apps/docs     5174  running    docs.localhost
+  apps/web      3000  running    web.localhost
+  packages/ui      —  no server  skipped
+
+  bind 3? [Y/n]
+```
+
+Then `http://web.localhost` reaches `localhost:3000`.
 
 ## Install
 
 ```bash
-npx @baboons/ports             # zero-install, opens the live UI
-npm i -g @baboons/ports        # then just: ports
+cargo install ports          # from source, any platform
+brew install baboons/tap/ports
+npx @baboons/ports           # fetches a prebuilt binary
 ```
 
-Requires Node 20.19+. No runtime dependencies. Screenshots additionally need
-any installed Chromium-family browser.
+Prebuilt binaries are published for **macOS arm64** and **Linux x86_64**.
+Anywhere else, `cargo install ports` builds from source — the installers say so
+rather than failing obscurely.
 
-## Usage
+No runtime dependencies. Nothing needs root unless you want port 80.
 
-`ports` with no arguments serves a live web dashboard and opens it. Every HTTP
-server is a real link — click, cmd-click, middle-click all work.
-
-```
-ports                  Serve the live web UI and open it
-ports ls               Print a one-shot table instead
-
-Server options
-    --port <n>        Port to serve the UI on (default 7373)
-    --host <h>        Interface to bind (default 127.0.0.1)
-    --no-open         Do not open a browser
-    --no-screenshots  Skip page thumbnails (no headless browser)
-
-Listing options
--a, --all        Include listeners that do not speak HTTP
-    --fast       Skip the full 1-65535 sweep (tiers 0-2 only)
--r, --refresh    Ignore cached descriptions and re-probe everything
-    --no-cache   Do not read or write the cache at all
-    --json       Emit JSON instead of a table
--q, --quiet      Suppress the progress line
-```
-
-The UI port resolves in this order: `--port`, then `PORTS_PORT`, then
-`~/.config/ports/config.json`, then 7373. Naming a port explicitly makes a
-collision a hard error naming the process that holds it; the default port
-quietly moves aside instead. Ports below 1024 need root:
+### Updating
 
 ```bash
-sudo npx @baboons/ports --port 80
+ports update --check    # is there a newer one?
+ports update            # install it
 ```
 
-If an instance is already running on the target port, a second invocation
-detects it and just opens the browser rather than starting a rival scanner.
+`ports` checks GitHub for a new release at most once a day, in the background,
+and mentions it in the footer of a listing. Nothing is downloaded or replaced
+until you ask — this binary can be running as a root daemon, and a self-updater
+that swaps it quietly turns a compromised release into root on your machine.
 
-### Serving to other machines
+Downloads are checked against the SHA-256 the release publishes and refused on
+any mismatch, so a truncated or corrupted transfer never lands as an executable.
+Worth being clear about the limit: that catches corruption, not a compromised
+release — an attacker who can publish the binary can publish the checksum too.
 
-`--host 0.0.0.0` exposes the board on the LAN, which is how you would run it on
-a NAS or dev box. Links are built from whatever host you opened the board on —
-`nas.local`, a LAN IP, a tunnel hostname — never from the loopback address the
-scanner probes, so clicking a row reaches the right machine. Services bound only
-to `127.0.0.1` genuinely cannot be reached from elsewhere; those are tagged
-`loopback only` when you are viewing remotely, instead of handing you a link
-that times out.
+If the copy you are running belongs to Homebrew, cargo, npm or Nix, `ports
+update` says so and gives you that tool's command instead of replacing a file
+behind its back.
 
-Note that this publishes a full inventory of the machine's listening ports to
-anyone who can reach that address, so keep it to networks you trust.
+## Listing
 
-Run under `sudo` to also see other users' processes — unprivileged `lsof` only
-reports your own, so root-owned servers are found by the sweep but arrive
-without a PID or project name.
-
-### Screenshots
-
-Servers that answer **2xx with HTML** get a page thumbnail, shown inline in the
-list and full-width in grid view (`GRID` in the header, or `?view=grid`).
-
-Capture runs after each background scan, never before, so the board is usable
-immediately. Images are re-taken only when the page changes or after 15
-minutes, and orphaned ones are pruned.
-
-Redirects are followed: a server whose `/` answers 301 or 302 is captured at
-wherever the chain lands, which is the normal shape for a dev server sending
-you to `/login` or `/dashboard`. Two cases are deliberately skipped — a chain
-that ends on an error page, and one that leaves this machine. The second
-matters because Chrome follows redirects itself, so without the check a
-localhost port pointing at an external site would have us fetching and storing
-a picture of a public website.
-
-There is no Puppeteer dependency: `ports` drives an already-installed Chrome,
-Chromium, Edge or Brave over the DevTools Protocol, reusing one browser process
-for the whole batch. Detection checks the usual install paths and then `PATH`;
-point `PORTS_CHROME` at a binary to override it, or pass `--no-screenshots` to
-switch the feature off.
-
-If thumbnails cannot work, the reason is printed at startup and served from
-`/api/health` rather than leaving you with silent blanks:
+`ports` with no arguments prints what is running.
 
 ```
-  ports · http://127.0.0.1:7373/
-  screenshots off: no Chrome/Chromium/Edge/Brave found — install one, or set PORTS_CHROME=/path/to/binary
+-a, --all       Include listeners that do not speak HTTP
+    --fast      Skip the full 1-65535 sweep
+-r, --refresh   Ignore cached descriptions and re-probe everything
+    --no-cache  Do not read or write the cache at all
+    --json      Emit JSON instead of a table
+-q, --quiet     Suppress the progress line
 ```
 
-**On a headless box or NAS**, install any Chromium build (`apt install chromium`
-is enough). Running as root — normal on a NAS or in a container — is handled:
-Chrome refuses to start as root with its sandbox on, so `--no-sandbox` is added
-automatically, along with `--disable-dev-shm-usage` for the small `/dev/shm` in
-most container images.
+Discovery runs in tiers, fastest first:
 
-CDP is spoken over a WebSocket client bundled with the package rather than
-Node's global one, which only exists from 22.4. Screenshots therefore work on
-Node 20 as well, matching the engine range the package actually claims.
+| Tier | Method | Typical | Finds |
+|---|---|---|---|
+| 1 | Kernel socket table | ~5ms | Your listeners, **with pid and cwd** |
+| 2 | Connect probe, ~90 common dev ports | ~150ms | Ports the socket table cannot see |
+| 3 | Connect sweep, 1–65535 | ~1.5s | Everything else |
 
-Chrome's own `--screenshot` flag is not used, because it waits for the network
-to fall idle and a dev server holding an HMR socket never does.
+Run under `sudo` to also see other users' processes — unprivileged socket
+enumeration only reports your own, so root-owned servers are found by the sweep
+but arrive without a pid or project name.
+
+**Protocol detection.** We send a plaintext `GET /` and read the first bytes
+back. `HTTP/` means plaintext. A `0x15`/`0x16` TLS record, or a reset, means we
+retry over TLS with verification off — dev servers are usually self-signed, and
+refusing them would defeat the point.
+
+**Caching.** State lives in `~/.cache/ports/`, written atomically. A port whose
+description has not changed backs off exponentially from 2s to a 60s ceiling;
+the full sweep is trusted for five minutes. Together those take a repeat run
+from ~1.6s to ~0.03s. Ports discovered by a sweep that is currently being
+skipped are still shown, marked stale rather than dropped — caching makes the
+answer cheaper, never smaller.
 
 ### Curating what you see
 
-Most of a real machine's listening ports are app IPC endpoints you will never
-open. Hide them:
+Most of a machine's listening ports are app IPC endpoints you will never open:
 
 ```bash
-ports hide 6463 44450     # from the board and from ls
+ports hide 6463 44450
 ports unhide 6463
 ports hidden              # what is hidden, and where the file lives
 ```
 
-In the board, hover a row and click **×**; hidden entries collect in a
-*Hidden by you* drawer where **+** restores them.
+Rules live in `~/.config/ports/curation.json`, pretty-printed and meant to be
+edited by hand. `hiddenCommands` matches case-insensitively against the process
+name and command line, which is the quickest way to silence an app that
+scatters listeners across changing ports.
 
-Rules live in `~/.config/ports/curation.json`, which is pretty-printed and
-meant to be edited by hand:
-
-```json
-{
-  "version": 1,
-  "hiddenPorts": [6463],
-  "hiddenRanges": ["44000-44999"],
-  "hiddenCommands": ["Discord", "figma"]
-}
-```
-
-`hiddenCommands` matches case-insensitively against the process name and full
-command line, which is the quickest way to silence an app that scatters
-listeners across changing ports. Edits are picked up while the server runs, and
-clicking hide never rewrites rules you added by hand.
-
-Un-hiding only removes an exact-port rule. If a range or command rule still
-covers that port the UI says so, rather than leaving a button that appears to
-do nothing.
-
-### Status filter
-
-Most localhost endpoints returning 4xx/5xx are internal IPC helpers you would
-never open, so the board hides them by default and shows a count you can click
-to reveal. Toggle from the header; the choice is remembered per host.
-
-A third chip appears when it matters: **loopback**. Services bound only to
-`127.0.0.1` cannot be reached from another machine, so when you open the board
-remotely they are filtered out by default and the count says why. Viewed on the
-machine itself the chip stays hidden, since there almost everything is loopback
-and filtering would empty the board. Override with `?local=1`.
-
-## Running as a service
+## Local domains
 
 ```bash
-sudo ports service install --port 80 --host 0.0.0.0   # systemd, system-wide
-ports service install --user                          # systemd, just for you
-ports service status
-ports service uninstall
-ports service print                                   # see the unit, change nothing
+ports bind myapp 4000      # myapp.localhost → 127.0.0.1:4000
+ports bind 4000            # name inferred from the project running there
+ports bind api.myapp 4001  # multi-level names work
+ports unbind myapp
+ports links                # what is bound, and whether it is up
 ```
 
-On Linux this writes a systemd unit; on macOS a launchd agent. `ExecStart` is
-resolved from the running process, so it stays correct whether ports was
-installed globally, run through npx, or is a source checkout.
+Bindings live in `~/.config/ports/bindings.json`. The proxy watches that file,
+so a new binding is live within half a second — no restart.
 
-A system-wide unit runs as **root** on purpose: that is what allows binding a
-privileged port and what lets `lsof` see every user's processes, which is the
-point of a machine-wide dashboard. Use `--user` if you would rather it ran as
-you and saw only your own listeners — note that a user unit stops at logout
-unless you enable lingering, which the installer reminds you about.
+### `ports adopt`
 
-## How it works
+Run it in a repo and every server in it gets a name. It finds ports two ways:
 
-Discovery runs in tiers, fastest first, so results stream in rather than
-arriving all at once:
+- **Observed** — a running server whose process cwd is inside a workspace. This
+  is the reliable one: it watches rather than guesses.
+- **Declared**, for whatever is not up yet — `PORT` in `.env`, a `--port` flag
+  in the dev script, `server.port` in a vite or astro config, and only then the
+  framework's documented default.
 
-| Tier | Method | Typical | Finds |
-|---|---|---|---|
-| 1 | `lsof` process table | ~50ms | Your listeners, **with PID and cwd** |
-| 2 | Connect probe, ~80 common dev ports | ~200ms | Ports `lsof` cannot see |
-| 3 | Connect sweep, 1–65535 | ~4–8s | Everything else |
+A workspace with no evidence of a server is listed as skipped rather than given
+an invented port. Re-running updates moved ports in place rather than piling up
+duplicates.
 
-Each port found is queued for HTTP probing immediately, so tier 1 and 2 results
-are fully described while tier 3 is still sweeping.
+Workspaces come from the package manager's own manifest — `pnpm-workspace.yaml`,
+`package.json` workspaces, Cargo `members`, `go.work` — so turborepo, Nx and
+Lerna all work by way of whatever they delegate to. Adopting from inside
+`apps/web` still finds its siblings.
 
-**Protocol detection.** We send a plaintext `GET /` and read the first bytes
-back. `HTTP/` means plaintext. A `0x15`/`0x16` TLS record, or a reset, means we
-retry over TLS with certificate verification off — dev servers are usually
-self-signed, and refusing them would defeat the point. Anything else is
-recorded as a `tcp` listener and shown separately.
+```
+ports adopt [path]    Bind every server in a project
+    --dry-run         Show what would happen, write nothing
+-y, --yes             Skip the confirmation
+    --prefix          Qualify every name with the repo: web.acme.localhost
+```
 
-**Enrichment.** For anything that answers HTTP we capture status, `Server` and
-framework fingerprints, `<title>`, `<meta name=description>`, OpenGraph tags,
-theme colour and the best declared favicon (SVG preferred, then largest
-raster). HTTPS ports also record certificate subject, issuer, expiry and
-whether it is self-signed. PIDs resolve to a command, working directory and
-project name read from `package.json` / `pyproject.toml` / `Cargo.toml` /
-`go.mod`.
+### Running the proxy
+
+```bash
+ports serve                       # foreground, Ctrl-C to stop
+ports service install             # launchd or systemd, starts at boot
+ports service status
+ports service uninstall
+ports service print               # see the unit, change nothing
+```
+
+Ports 80 and 443 are the default and are the only reason any of this needs
+privileges. Set both above 1024 and nothing ever does:
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "httpPort": 8080, "httpsPort": 8443 }
+```
+
+`ports service install` picks the right variant on its own. On Linux a system
+unit binds `:80` via `AmbientCapabilities=CAP_NET_BIND_SERVICE` and **is never
+root**. macOS has no equivalent, so a LaunchDaemon starts as root, binds, and
+then permanently drops to your uid before serving a single request.
+
+### Choosing a domain
+
+`.localhost` is the default because it costs nothing: macOS, systemd-resolved
+and every browser already send `*.localhost` to loopback with no configuration,
+no DNS server and no sudo. It is also a *trustworthy origin*, so service
+workers, `crypto.subtle`, WebAuthn and `Secure` cookies work over plain HTTP.
+
+```bash
+ports domain                       # show what is served
+ports domain test                  # make .test canonical
+ports domain --add devbox.lan      # serve this one as well
+ports domain --remove test         # stop serving it
+sudo ports domain --install        # write resolver entries where needed
+```
+
+You can serve **several domains at once**, and every binding answers under all
+of them. The first is canonical — it is the one new bindings are printed as.
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "domains": ["devbox.lan", "localhost"] }
+```
+
+```
+myapp.localhost     ->  127.0.0.1:3000     (on the machine)
+myapp.devbox.lan    ->  127.0.0.1:3000     (from anywhere pointed here)
+ports.devbox.lan    ->  the index
+devbox.lan          ->  the index
+```
+
+The index answers at `ports.<domain>` for every domain, and on the bare domain
+too, so a name you land on with nothing bound shows what is available. Domains
+can be added, removed and made canonical from that page as well as from the
+CLI — both go through the same rules, so neither accepts what the other would
+refuse.
+
+When two configured domains both match, the longer one wins: with `lan` and
+`devbox.lan` configured, `myapp.devbox.lan` is `myapp`, not `myapp.devbox`.
+
+Any domain other than `.localhost` has to resolve to the machine somehow. If
+your router, LAN DNS or a hosts file already points it here — which is the
+usual case for something like `devbox.lan` — there is nothing to install.
+Otherwise `--install` writes the resolver entry: on macOS `/etc/resolver/<domain>`
+pointing at our DNS responder on `127.0.0.1:15353` (`/etc/resolver` supports a
+`port` keyword, so the responder stays unprivileged); on Linux a
+systemd-resolved drop-in, or a managed block in `/etc/hosts`.
+
+### Serving the network
+
+By default the proxy listens on `127.0.0.1` and is invisible to everything else.
+To reach it from other machines — a Linux box in the corner running your dev
+services — listen wider:
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "host": "0.0.0.0", "domains": ["devbox.lan", "localhost"] }
+```
+
+Then point `devbox.lan` and `*.devbox.lan` at that machine in your router's
+DNS, or in each laptop's hosts file:
+
+```
+10.0.1.46  devbox.lan myapp.devbox.lan ports.devbox.lan
+```
+
+Two things to know before you do. The index **lists every service on the
+machine**, which is a fuller inventory than you may want on a shared network.
+And `bind`/`unbind` from the page are **refused from anywhere but the machine
+itself** — the Origin check that protects a browser is worth nothing against a
+peer that can set headers freely, so the listing stays readable from your laptop
+while changing it stays a `ports bind` on the box.
+
+`.dev`, `.app`, `.zip` and `.mov` are refused: they are real TLDs on the HSTS
+preload list, so browsers force HTTPS before the request reaches anything and
+plain HTTP could never work. `.local` is refused because mDNS owns it. `.test`
+is reserved by RFC 6761 for exactly this and is the best custom choice.
+
+### HTTPS
+
+```bash
+ports ca                 # which CA certificates come from
+ports ca install         # generate one, if you have no mkcert root
+```
+
+Leaf certificates are minted per hostname on demand and cached under
+`~/.local/share/ports/certs/`. They are signed by a local CA — mkcert's if you
+have one, which most people already do and which the machine already trusts, so
+nothing new joins your trust store.
+
+HTTPS stays off unless a CA is available. A plain self-signed certificate is
+worse than no HTTPS: the browser interstitial is clickable, but `fetch()` to
+that origin is not, so it fails opaquely in exactly the case you would hit
+first.
+
+If you are on `.localhost` you may not need any of this — plain HTTP already
+gets the secure-context APIs there.
+
+### When something is wrong
+
+```bash
+ports doctor
+```
+
+```
+  ✓ resolution    *.localhost resolves to loopback
+  – dns           *.localhost needs no DNS server
+  ✓ proxy         proxy answering on port 80
+  ! upstreams     1 of 3 upstreams down: api.localhost
+  ✓ certificates  issuing from the mkcert root
+  ✓ end to end    web.localhost reaches its server
+```
+
+A local domain can fail at five layers and the browser reports nearly all of
+them identically, so each is checked separately.
+
+## What changes when you use a name
+
+`myapp.localhost` and `localhost:3000` are **different origins**. Most of what
+follows is a one-time fix, but none of it is a bug in the proxy.
+
+**Dev servers will block you first.** This is DNS-rebinding protection working
+as intended. `ports bind` detects the rejection and prints the fix:
+
+| Stack | Fix |
+|---|---|
+| Vite | `server: { allowedHosts: ['.localhost'] }` |
+| webpack-dev-server | `devServer: { allowedHosts: 'all' }` |
+| Rails | `config.hosts << '.localhost'` |
+| Django | `ALLOWED_HOSTS = ['.localhost']` |
+| Next.js Server Actions | `experimental.serverActions.allowedOrigins` |
+
+**Browser state does not carry over.** Cookies, `localStorage` and IndexedDB are
+per-origin, so you will be logged out the first time and the app starts empty.
+You cannot share cookies across `.localhost` subdomains with a `Domain=`
+attribute; `.test` is more permissive there if `app.test` and `api.test` need a
+shared session.
+
+**CORS and OAuth need the new origin registered.** A backend hardcoding
+`Access-Control-Allow-Origin: http://localhost:3000` will reject you, and a
+redirect URI registered as `http://localhost:3000/callback` will not match.
+Some providers — Google notably — refuse plain-HTTP redirect URIs for anything
+but literal `localhost`, which may force you onto HTTPS.
+
+**HSTS is sticky.** If any app ever sends `Strict-Transport-Security` on your
+local hostname, the browser pins HTTPS for that name and you cannot go back to
+HTTP without clearing it in `chrome://net-internals/#hsts`. `ports` does not
+strip the header, so avoid sending it in development.
+
+What the proxy does handle: WebSocket upgrades (without which Vite's HMR socket
+never connects and the page silently stops hot-reloading), the original `Host`
+preserved plus `X-Forwarded-*` so frameworks generate correct absolute URLs,
+unbuffered streaming so SSE works, and redirects that name the upstream
+directly rewritten back to the bound hostname.
 
 ## Development
 
 ```bash
-pnpm install
-pnpm ls            # run from source, no build step
-pnpm test          # unit tests for the parsers
-pnpm typecheck
-pnpm build         # compile to dist/
+cargo test
+cargo build --release
+cargo run -- adopt --dry-run
 ```
 
-Source imports carry `.ts` extensions so `node --experimental-strip-types` can
-run the tree directly; `tsc` rewrites them to `.js` when building `dist/`.
+The crate is a library plus a binary, so the proxy can be driven end-to-end
+from `tests/` — a WebSocket upgrade tunnelling bytes both ways, and an SSE
+stream asserted to arrive unbuffered. Those are the two things a naive proxy
+breaks without any error surfacing.
 
-## Caching
+## License
 
-State lives in `~/.cache/ports/` — `state.json` plus content-addressed
-`favicons/` and `shots/` directories, written atomically so a crash mid-write
-cannot corrupt it. Two things make repeat runs fast:
-
-- **Per-port TTL.** A port whose description has not changed backs off
-  exponentially, from 2s up to a 60s ceiling. Non-HTTP listeners sit at 120s,
-  ports known to be down at 5 minutes.
-- **Sweep TTL.** Tier 3 is the only expensive step, so its result is trusted
-  for 5 minutes. Inside that window a run uses tiers 1 and 2 only.
-
-Together those take a repeat `ports ls` from ~6s to ~0.1s. Ports discovered by
-a sweep that is currently being skipped are still shown, marked stale rather
-than dropped — caching makes the answer cheaper, never smaller.
-
-The cache doubles as the index: servers that stop running are kept as history
-rather than deleted, and appear under "Previously seen".
-
-## Status
-
-Complete: scanner core, cache and scheduler, SSE server, the live UI, and page
-screenshots. Still to come:
-
-5. **Index & search** — full-text search across titles, descriptions, commands
-   and project names; grouping by project directory.
+MIT
