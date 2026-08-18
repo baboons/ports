@@ -34,11 +34,12 @@ Then `http://web.localhost` reaches `localhost:3000`.
 ## Install
 
 Prebuilt binaries for **macOS arm64** and **Linux x86_64** are attached to each
-[release](https://github.com/baboons/ports/releases):
+[release](https://github.com/baboons/ports/releases). The Linux build is
+statically linked, so it runs on any distribution regardless of its glibc:
 
 ```bash
 # Linux x86_64
-curl -fsSL https://github.com/baboons/ports/releases/latest/download/ports-x86_64-unknown-linux-gnu.gz \
+curl -fsSL https://github.com/baboons/ports/releases/latest/download/ports-x86_64-unknown-linux-musl.gz \
   | gunzip > ports && chmod +x ports && sudo mv ports /usr/local/bin/
 
 # macOS arm64

@@ -68,7 +68,7 @@ impl std::fmt::Display for Version {
 pub fn target_triple() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
-        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
         // Anything else was built from source and should keep being.
         _ => None,
     }
@@ -461,8 +461,8 @@ mod tests {
             "ports-aarch64-apple-darwin.gz"
         );
         assert_eq!(
-            artifact_name("x86_64-unknown-linux-gnu"),
-            "ports-x86_64-unknown-linux-gnu.gz"
+            artifact_name("x86_64-unknown-linux-musl"),
+            "ports-x86_64-unknown-linux-musl.gz"
         );
     }
 
@@ -481,14 +481,14 @@ mod tests {
     fn reads_a_checksum_out_of_the_manifest() {
         let manifest = "\
 abc123  ports-aarch64-apple-darwin.gz
-def456  ports-x86_64-unknown-linux-gnu.gz
+def456  ports-x86_64-unknown-linux-musl.gz
 ";
         assert_eq!(
             checksum_for(manifest, "ports-aarch64-apple-darwin.gz").as_deref(),
             Some("abc123")
         );
         assert_eq!(
-            checksum_for(manifest, "ports-x86_64-unknown-linux-gnu.gz").as_deref(),
+            checksum_for(manifest, "ports-x86_64-unknown-linux-musl.gz").as_deref(),
             Some("def456")
         );
         // A target with no entry must not silently match another's hash.

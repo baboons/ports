@@ -23,7 +23,7 @@ const { version } = JSON.parse(await readFile(path.join(here, 'package.json'), '
 // platform into a confusing 404 instead of a clear "build it yourself".
 const TARGETS = {
   'darwin-arm64': 'aarch64-apple-darwin',
-  'linux-x64': 'x86_64-unknown-linux-gnu',
+  'linux-x64': 'x86_64-unknown-linux-musl',
 };
 
 /** Print the fallback and exit successfully. */

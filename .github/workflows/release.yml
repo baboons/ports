@@ -16,8 +16,10 @@ jobs:
           # Apple silicon. macos-latest is already arm64, so this is native.
           - target: aarch64-apple-darwin
             os: macos-latest
-          # Linux amd64.
-          - target: x86_64-unknown-linux-gnu
+          # Linux amd64, statically linked against musl. A glibc build is
+          # tied to the glibc of whatever runner built it, so it refuses to
+          # start on any older distribution; this one runs anywhere.
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
@@ -30,6 +32,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -47,6 +53,18 @@ jobs:
 
       - run: cargo test --all-targets
       - run: cargo build --release --target ${{ matrix.target }}
+
+      # A binary that quietly picked up a dynamic libc would fail on exactly
+      # the older machines this target exists to serve.
+      - name: Confirm the Linux build is static
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          file "target/${{ matrix.target }}/release/ports"
+          if ldd "target/${{ matrix.target }}/release/ports" 2>&1 | grep -qv "not a dynamic executable"; then
+            echo "expected a statically linked binary" >&2
+            ldd "target/${{ matrix.target }}/release/ports" >&2
+            exit 1
+          fi
 
       # A single gzipped binary rather than a tarball, so the npm installer and
       # the self-updater need nothing but a gunzip.
