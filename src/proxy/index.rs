@@ -91,6 +91,10 @@ pub struct Snapshot {
     pub writable: bool,
     /// The host this page was reached on, which every link is built from.
     pub via: String,
+    /// What this daemon is running.
+    pub version: String,
+    /// A newer release, when the daily check has seen one.
+    pub update: Option<String>,
 }
 
 /// What to show, given the bindings and the last scan.
@@ -226,6 +230,11 @@ pub fn snapshot(
         domains,
         writable,
         via,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        // Read from the cache the background check writes, so rendering the
+        // page never waits on the network.
+        update: crate::update::pending_update(crate::update::read_cache().as_ref())
+            .map(|version| version.to_string()),
     }
 }
 
@@ -409,6 +418,10 @@ color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 border-radius:5px;border:1px solid var(--line);background:transparent;color:var(--fg)}
 .add input:focus{outline:none;border-color:var(--accent)}
 .note{color:var(--dim);font-size:.82rem;padding:.2rem .25rem 0}
+footer{margin-top:2.5rem;padding-top:1rem;border-top:1px solid var(--line);
+color:var(--dim);font-size:.8rem;display:flex;gap:.6rem;align-items:center}
+footer code{font-size:.95em}
+footer .new{color:var(--accent)}
 .up{color:var(--ok)}.down{color:var(--down)}
 button{font:inherit;font-size:.8rem;padding:.25rem .7rem;border-radius:5px;
 border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer}
@@ -479,7 +492,12 @@ function render(d){
                     : `<div class=empty>Nothing bound yet.</div>`) +
     `<h2>Running, not bound</h2>` +
     (d.unbound.length ? d.unbound.map(r=>row(r,false)).join('')
-                      : `<div class=empty>Nothing else running.</div>`);
+                      : `<div class=empty>Nothing else running.</div>`) +
+    `<footer><code>ports v${esc(d.version)}</code>` +
+    (d.update
+      ? `<span class=new>v${esc(d.update)} available \u2014 <code>ports update</code></span>`
+      : '') +
+    `</footer>`;
 }
 
 async function post(path, body, button){
@@ -926,6 +944,26 @@ mod tests {
         let html = render(&snap, Some("<script>alert(1)</script>.localhost"));
         assert!(!html.contains("<script>alert(1)"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_snapshot_reports_the_running_version() {
+        let snap = snapshot(&Bindings::default(), &[], true, "ports.localhost");
+        // What the daemon is actually running, not what is on disk elsewhere.
+        assert_eq!(snap.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_footer_names_the_version() {
+        let html = render(
+            &snapshot(&Bindings::default(), &[], true, "ports.localhost"),
+            None,
+        );
+        assert!(html.contains("<footer>"), "the page should have a footer");
+        assert!(
+            html.contains(env!("CARGO_PKG_VERSION")),
+            "the footer should name the version"
+        );
     }
 
     #[test]
