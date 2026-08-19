@@ -24,6 +24,14 @@ pub const DEFAULT_HTTPS_PORT: u16 = 443;
 /// service on the machine and that is not something to expose by accident.
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 
+/// Unprivileged by default: `/etc/resolver` can name a port, so nothing needs
+/// root just to make a custom domain resolve on this machine. Serving a whole
+/// network means moving to 53, which is a deliberate step.
+pub const DEFAULT_DNS_PORT: u16 = 15353;
+
+/// Cloudflare's pair. Queries we have no answer for go here.
+pub const DEFAULT_FORWARDERS: [&str; 2] = ["1.1.1.1", "1.0.0.1"];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     /// The subdomain, without the TLD. May contain dots: "api.myapp".
@@ -39,6 +47,56 @@ impl Binding {
     pub fn hostname(&self, tld: &str) -> String {
         format!("{}.{}", self.name, tld)
     }
+}
+
+/// The resolver's own settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsConfig {
+    /// 15353 to answer only what `/etc/resolver` sends here; 53 to be a
+    /// resolver other machines can point at.
+    #[serde(default = "default_dns_port")]
+    pub port: u16,
+
+    /// Where anything we have no answer for is sent.
+    #[serde(default = "default_forwarders")]
+    pub forward: Vec<String>,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            port: default_dns_port(),
+            forward: default_forwarders(),
+        }
+    }
+}
+
+impl DnsConfig {
+    /// The upstreams as addresses, dropping anything unparseable.
+    ///
+    /// A bare IP is the normal thing to write, so `:53` is filled in.
+    pub fn forwarders(&self) -> Vec<std::net::SocketAddr> {
+        self.forward
+            .iter()
+            .filter_map(|entry| parse_forwarder(entry))
+            .collect()
+    }
+}
+
+/// Accept `1.1.1.1`, `1.1.1.1:53`, or a bracketed IPv6 address.
+pub fn parse_forwarder(entry: &str) -> Option<std::net::SocketAddr> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    if let Ok(address) = entry.parse::<std::net::SocketAddr>() {
+        return Some(address);
+    }
+    // No port given: DNS is 53 unless told otherwise.
+    entry
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| std::net::SocketAddr::new(ip, 53))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +125,9 @@ pub struct Bindings {
     pub https_port: Option<u16>,
     #[serde(default)]
     pub bindings: Vec<Binding>,
+
+    #[serde(default)]
+    pub dns: DnsConfig,
 }
 
 fn default_version() -> u32 {
@@ -77,6 +138,12 @@ fn default_domains() -> Vec<String> {
 }
 fn default_host() -> String {
     DEFAULT_HOST.to_string()
+}
+fn default_dns_port() -> u16 {
+    DEFAULT_DNS_PORT
+}
+fn default_forwarders() -> Vec<String> {
+    DEFAULT_FORWARDERS.iter().map(|s| s.to_string()).collect()
 }
 fn default_http_port() -> u16 {
     DEFAULT_HTTP_PORT
@@ -94,6 +161,7 @@ impl Default for Bindings {
             http_port: DEFAULT_HTTP_PORT,
             https_port: default_https_port_opt(),
             bindings: Vec::new(),
+            dns: DnsConfig::default(),
         }
     }
 }
@@ -248,9 +316,12 @@ pub fn save_bindings_to(path: &std::path::Path, bindings: &Bindings) -> std::io:
     write_atomic(path, &json)
 }
 
-/// Both proxy ports are unprivileged, so the daemon needs no root.
+/// Any port below 1024 means the daemon must be able to bind a privileged one.
 pub fn needs_privilege(bindings: &Bindings) -> bool {
-    bindings.http_port < 1024 || bindings.https_port.is_some_and(|p| p < 1024)
+    bindings.http_port < 1024
+        || bindings.https_port.is_some_and(|p| p < 1024)
+        // A resolver on 53 needs exactly the same treatment as a proxy on 80.
+        || bindings.dns.port < 1024
 }
 
 /// Normalise a name into the subdomain part of a hostname.

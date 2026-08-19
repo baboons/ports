@@ -40,7 +40,9 @@ fn empty() -> ProxyBody {
 
 /// Shared, hot-reloadable state.
 pub struct ProxyState {
-    pub bindings: RwLock<Bindings>,
+    /// An Arc so the resolver can hold the same table and see a domain added
+    /// from the index without a restart.
+    pub bindings: Arc<RwLock<Bindings>>,
     /// What the background scan last saw, for the index page.
     pub records: RwLock<Vec<crate::types::PortRecord>>,
     /// The file this daemon reads and writes.
@@ -57,7 +59,7 @@ impl ProxyState {
 
     pub fn with_path(bindings: Bindings, bindings_path: std::path::PathBuf) -> Self {
         Self {
-            bindings: RwLock::new(bindings),
+            bindings: Arc::new(RwLock::new(bindings)),
             records: RwLock::new(Vec::new()),
             bindings_path,
         }

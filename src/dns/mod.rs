@@ -1,27 +1,34 @@
-//! A DNS server that only knows how to say "loopback".
+//! A resolver that answers for the bound domains and forwards the rest.
 //!
-//! Needed only when the local TLD is not `.localhost`, which the OS already
-//! resolves on its own. Everything under the configured TLD answers 127.0.0.1
-//! (or ::1), everything else is NXDOMAIN.
+//! Names under a configured domain get 127.0.0.1 (or ::1); anything else is
+//! relayed to an upstream resolver — Cloudflare by default — and its reply
+//! returned untouched. That second half is what lets a whole network point at
+//! this machine, rather than only this machine pointing at itself.
 //!
-//! Hand-rolled rather than pulled from a DNS crate: the subset of the protocol
-//! required here is a header, one question and one answer record, and a full
-//! server library brings a zone model, recursion and a resolver we would never
-//! use.
+//! Hand-rolled rather than pulled from a DNS crate. What we parse is a header
+//! and one question, and what we generate is one A or AAAA record; everything
+//! else is bytes in and bytes out. A server library would bring a zone model,
+//! recursion and a cache we do not use.
 
 pub mod resolver;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::RwLock;
 
-/// The unprivileged port the responder listens on.
-///
-/// `/etc/resolver/<tld>` supports a `port` keyword, so nothing here needs root
-/// even when the TLD is custom.
-pub const DNS_PORT: u16 = 15353;
+use crate::config::bindings::Bindings;
+
+/// How long to wait on one upstream before trying the next.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(3);
+/// DNS over TCP is length-prefixed; nothing legitimate approaches this.
+const MAX_TCP_MESSAGE: usize = 8 * 1024;
+
+/// Kept as the default; the configured value is what actually binds.
+pub const DNS_PORT: u16 = crate::config::bindings::DEFAULT_DNS_PORT;
 
 const TYPE_A: u16 = 1;
 const TYPE_AAAA: u16 = 28;
@@ -104,13 +111,19 @@ pub enum Answer {
     /// The name exists but has no record of the type asked for.
     NoData,
     NameError,
+    /// We will not resolve this for you.
+    Refused,
+    /// We should have been able to answer and could not.
+    ServerFailure,
 }
 
 pub fn build_response(query: &Query, answer: &Answer) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
 
     let rcode: u16 = match answer {
+        Answer::ServerFailure => 2,
         Answer::NameError => 3,
+        Answer::Refused => 5,
         _ => 0,
     };
     let answer_count: u16 = match answer {
@@ -151,50 +164,198 @@ pub fn build_response(query: &Query, answer: &Answer) -> Vec<u8> {
     out
 }
 
-/// Decide what to answer for a name.
-pub fn answer_for(query: &Query, tld: &str) -> Answer {
+/// Decide what to answer for a name, or None when it is not ours to answer.
+///
+/// None is the signal to forward: a name outside our domains is a question for
+/// somebody else, not a name that does not exist.
+pub fn answer_for_domains(query: &Query, bindings: &Bindings) -> Option<Answer> {
     if query.qclass != CLASS_IN {
-        return Answer::NameError;
+        return None;
     }
 
-    let tld = tld.trim_matches('.').to_lowercase();
-    let under_tld = query.name == tld || query.name.ends_with(&format!(".{tld}"));
-    if !under_tld {
-        return Answer::NameError;
+    let ours = bindings.domains.iter().any(|domain| {
+        let domain = domain.trim_matches('.').to_lowercase();
+        query.name == domain || query.name.ends_with(&format!(".{domain}"))
+    });
+    if !ours {
+        return None;
     }
 
-    match query.qtype {
+    Some(match query.qtype {
         TYPE_A => Answer::Address(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         TYPE_AAAA => Answer::Address(IpAddr::V6(Ipv6Addr::LOCALHOST)),
         // The name exists, it just has no MX or HTTPS record. Saying NXDOMAIN
         // here would make some resolvers treat the whole name as missing.
         _ => Answer::NoData,
+    })
+}
+
+/// Decide what to answer for a single domain. Kept for the tests that predate
+/// the domain list, and for anyone reasoning about one domain at a time.
+pub fn answer_for(query: &Query, tld: &str) -> Answer {
+    let bindings = Bindings {
+        domains: vec![tld.to_string()],
+        ..Default::default()
+    };
+    answer_for_domains(query, &bindings).unwrap_or(Answer::NameError)
+}
+
+/// Everything the resolver needs to answer a query.
+pub struct Resolver {
+    /// Shared with the proxy, so a domain added from the page resolves at once.
+    pub bindings: Arc<RwLock<Bindings>>,
+}
+
+impl Resolver {
+    pub fn new(bindings: Arc<RwLock<Bindings>>) -> Self {
+        Self { bindings }
+    }
+
+    /// Produce a reply for one query message.
+    ///
+    /// Returns None when the query is unparseable or the client has no
+    /// business asking us, in which case nothing is sent back at all.
+    pub async fn respond(&self, packet: &[u8], client: IpAddr) -> Option<Vec<u8>> {
+        let query = parse_query(packet)?;
+
+        let (answer, forwarders) = {
+            let bindings = self.bindings.read().await;
+            let answer = answer_for_domains(&query, &bindings);
+            (answer, bindings.dns.forwarders())
+        };
+
+        // A name we own is answered here, whoever asked.
+        if let Some(answer) = answer {
+            return Some(build_response(&query, &answer));
+        }
+
+        // Everything else is someone else's to answer. Only for clients we are
+        // willing to resolve on behalf of.
+        if !may_forward_for(client) {
+            return Some(build_response(&query, &Answer::Refused));
+        }
+
+        match forward(packet, &forwarders).await {
+            Some(reply) => Some(reply),
+            // Upstream unreachable is a server failure, not a missing name:
+            // NXDOMAIN would tell the client the name does not exist and get
+            // cached as such.
+            None => Some(build_response(&query, &Answer::ServerFailure)),
+        }
     }
 }
 
-/// Bind and serve. Used by tests; the daemon binds separately so it can give
-/// up its privileges before answering anything.
-pub async fn serve(tld: Arc<RwLock<String>>, port: u16) -> anyhow::Result<()> {
-    let socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-    serve_on(socket, tld).await
+/// Should we resolve arbitrary names for this client?
+///
+/// Loopback and private networks only. Binding :53 on a machine whose router
+/// forwards port 53 would otherwise make it an open resolver, which is a
+/// reflection-attack amplifier that gets you a call from your ISP.
+pub fn may_forward_for(client: IpAddr) -> bool {
+    match client {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            // Loopback, link-local (fe80::/10) and unique-local (fc00::/7).
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
 }
 
-/// Serve DNS over an already-bound socket.
-pub async fn serve_on(socket: UdpSocket, tld: Arc<RwLock<String>>) -> anyhow::Result<()> {
-    let mut buffer = vec![0u8; 512];
+/// Relay a query to the first upstream that answers.
+async fn forward(packet: &[u8], upstreams: &[SocketAddr]) -> Option<Vec<u8>> {
+    for upstream in upstreams {
+        // An ephemeral socket per query, bound to match the upstream family.
+        let bind: SocketAddr = if upstream.is_ipv6() {
+            "[::]:0".parse().ok()?
+        } else {
+            "0.0.0.0:0".parse().ok()?
+        };
+        let Ok(socket) = UdpSocket::bind(bind).await else {
+            continue;
+        };
+        if socket.send_to(packet, upstream).await.is_err() {
+            continue;
+        }
+
+        let mut buffer = vec![0u8; 4096];
+        match tokio::time::timeout(FORWARD_TIMEOUT, socket.recv_from(&mut buffer)).await {
+            Ok(Ok((size, from))) if from.ip() == upstream.ip() => {
+                buffer.truncate(size);
+                return Some(buffer);
+            }
+            // A reply from somewhere else is not an answer to this question.
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Serve DNS over UDP on an already-bound socket.
+pub async fn serve_udp(socket: UdpSocket, resolver: Arc<Resolver>) -> anyhow::Result<()> {
+    let socket = Arc::new(socket);
+    let mut buffer = vec![0u8; 4096];
 
     loop {
         let Ok((size, peer)) = socket.recv_from(&mut buffer).await else {
             continue;
         };
-        let Some(query) = parse_query(&buffer[..size]) else {
+        let packet = buffer[..size].to_vec();
+        let socket = Arc::clone(&socket);
+        let resolver = Arc::clone(&resolver);
+
+        // Spawned so a slow upstream cannot hold up every other query.
+        tokio::spawn(async move {
+            if let Some(reply) = resolver.respond(&packet, peer.ip()).await {
+                let _ = socket.send_to(&reply, peer).await;
+            }
+        });
+    }
+}
+
+/// Serve DNS over TCP.
+///
+/// Not optional in practice: when a reply does not fit in a UDP datagram the
+/// server sets the truncated bit and the client retries over TCP, so a
+/// UDP-only resolver fails on exactly the large answers it should handle.
+pub async fn serve_tcp(listener: TcpListener, resolver: Arc<Resolver>) -> anyhow::Result<()> {
+    loop {
+        let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
-
-        let answer = answer_for(&query, &tld.read().await);
-        let response = build_response(&query, &answer);
-        let _ = socket.send_to(&response, peer).await;
+        let resolver = Arc::clone(&resolver);
+        tokio::spawn(async move {
+            let _ = handle_tcp(stream, peer.ip(), resolver).await;
+        });
     }
+}
+
+async fn handle_tcp(
+    mut stream: TcpStream,
+    client: IpAddr,
+    resolver: Arc<Resolver>,
+) -> anyhow::Result<()> {
+    // DNS over TCP frames every message with its length.
+    let mut length = [0u8; 2];
+    stream.read_exact(&mut length).await?;
+    let length = u16::from_be_bytes(length) as usize;
+    if length == 0 || length > MAX_TCP_MESSAGE {
+        return Ok(());
+    }
+
+    let mut packet = vec![0u8; length];
+    stream.read_exact(&mut packet).await?;
+
+    let Some(reply) = resolver.respond(&packet, client).await else {
+        return Ok(());
+    };
+
+    stream
+        .write_all(&(reply.len() as u16).to_be_bytes())
+        .await?;
+    stream.write_all(&reply).await?;
+    stream.flush().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,16 +489,226 @@ mod tests {
         assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0);
     }
 
+    fn table(domains: &[&str]) -> Arc<RwLock<Bindings>> {
+        Arc::new(RwLock::new(Bindings {
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+            ..Default::default()
+        }))
+    }
+
+    /// A stand-in upstream that answers everything with one fixed address.
+    async fn fake_upstream(address: [u8; 4]) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buffer = vec![0u8; 4096];
+            while let Ok((size, peer)) = socket.recv_from(&mut buffer).await {
+                let Some(query) = parse_query(&buffer[..size]) else {
+                    continue;
+                };
+                let reply = build_response(&query, &Answer::Address(IpAddr::V4(address.into())));
+                let _ = socket.send_to(&reply, peer).await;
+            }
+        });
+        local
+    }
+
+    #[tokio::test]
+    async fn a_name_we_own_is_answered_here_not_forwarded() {
+        let bindings = table(&["nas.lan"]);
+        // An upstream that would answer differently, to prove it was not asked.
+        let upstream = fake_upstream([9, 9, 9, 9]).await;
+        bindings.write().await.dns.forward = vec![upstream.to_string()];
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("myapp.nas.lan", TYPE_A),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .await
+            .expect("should answer");
+
+        assert_eq!(&reply[reply.len() - 4..], &[127, 0, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn anything_else_is_forwarded_and_the_reply_returned() {
+        let bindings = table(&["nas.lan"]);
+        let upstream = fake_upstream([9, 9, 9, 9]).await;
+        bindings.write().await.dns.forward = vec![upstream.to_string()];
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("example.com", TYPE_A),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .await
+            .expect("should forward");
+
+        // The upstream's answer, verbatim.
+        assert_eq!(&reply[reply.len() - 4..], &[9, 9, 9, 9]);
+        // And the client's transaction id survived the round trip.
+        assert_eq!(u16::from_be_bytes([reply[0], reply[1]]), 0x1234);
+    }
+
+    #[tokio::test]
+    async fn the_first_upstream_that_answers_wins() {
+        let bindings = table(&["nas.lan"]);
+        let working = fake_upstream([9, 9, 9, 9]).await;
+        // A blackhole first: nothing listens on this port.
+        let dead = "127.0.0.1:1".to_string();
+        bindings.write().await.dns.forward = vec![dead, working.to_string()];
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("example.com", TYPE_A),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .await
+            .expect("should fall through to the second");
+
+        assert_eq!(&reply[reply.len() - 4..], &[9, 9, 9, 9]);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_upstream_is_a_server_failure_not_a_missing_name() {
+        let bindings = table(&["nas.lan"]);
+        bindings.write().await.dns.forward = vec!["127.0.0.1:1".into()];
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("example.com", TYPE_A),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // NXDOMAIN would tell the client the name does not exist, and be
+        // cached as such long after the upstream came back.
+        let rcode = u16::from_be_bytes([reply[2], reply[3]]) & 0x000F;
+        assert_eq!(rcode, 2, "expected SERVFAIL");
+    }
+
+    #[test]
+    fn only_private_clients_get_arbitrary_names_resolved() {
+        // Binding :53 where a router forwards it would otherwise make this an
+        // open resolver, which is a reflection amplifier.
+        for allowed in ["127.0.0.1", "10.0.1.2", "192.168.1.5", "172.16.0.9", "::1"] {
+            assert!(
+                may_forward_for(allowed.parse().unwrap()),
+                "{allowed} is on the local network"
+            );
+        }
+        for refused in ["8.8.8.8", "1.1.1.1", "203.0.113.7", "2606:4700::1111"] {
+            assert!(
+                !may_forward_for(refused.parse().unwrap()),
+                "{refused} is not ours to resolve for"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_client_is_refused_rather_than_served() {
+        let bindings = table(&["nas.lan"]);
+        let resolver = Resolver::new(bindings);
+
+        let reply = resolver
+            .respond(
+                &query_bytes("example.com", TYPE_A),
+                "8.8.8.8".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        let rcode = u16::from_be_bytes([reply[2], reply[3]]) & 0x000F;
+        assert_eq!(rcode, 5, "expected REFUSED");
+
+        // Our own domains are still answered, since that reveals nothing an
+        // HTTP request to the same box would not.
+        let ours = resolver
+            .respond(
+                &query_bytes("myapp.nas.lan", TYPE_A),
+                "8.8.8.8".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(&ours[ours.len() - 4..], &[127, 0, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn every_configured_domain_is_answered_locally() {
+        let bindings = table(&["nas.lan", "localhost"]);
+        let resolver = Resolver::new(bindings);
+
+        for name in ["myapp.nas.lan", "myapp.localhost", "nas.lan"] {
+            let reply = resolver
+                .respond(&query_bytes(name, TYPE_A), "127.0.0.1".parse().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(&reply[reply.len() - 4..], &[127, 0, 0, 1], "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn answers_over_tcp_with_its_length_framing() {
+        let bindings = table(&["nas.lan"]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = serve_tcp(listener, Arc::new(Resolver::new(bindings))).await;
+        });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let query = query_bytes("myapp.nas.lan", TYPE_A);
+        stream
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&query).await.unwrap();
+
+        let mut length = [0u8; 2];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut reply = vec![0u8; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut reply).await.unwrap();
+
+        assert_eq!(&reply[reply.len() - 4..], &[127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn forwarders_accept_a_bare_address_or_one_with_a_port() {
+        use crate::config::bindings::parse_forwarder;
+        assert_eq!(
+            parse_forwarder("1.1.1.1").map(|a| a.to_string()).as_deref(),
+            Some("1.1.1.1:53")
+        );
+        assert_eq!(
+            parse_forwarder("9.9.9.9:5353")
+                .map(|a| a.to_string())
+                .as_deref(),
+            Some("9.9.9.9:5353")
+        );
+        assert_eq!(
+            parse_forwarder("[2606:4700:4700::1111]:53").map(|a| a.to_string()),
+            Some("[2606:4700:4700::1111]:53".to_string())
+        );
+        assert!(parse_forwarder("not-an-address").is_none());
+        assert!(parse_forwarder("").is_none());
+    }
+
     #[tokio::test]
     async fn resolves_over_a_real_socket() {
-        let tld = Arc::new(RwLock::new("test".to_string()));
-        // Port 0 lets the OS pick; bind first to learn which.
-        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let bindings = Arc::new(RwLock::new(Bindings {
+            domains: vec!["test".into()],
+            ..Default::default()
+        }));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
 
         tokio::spawn(async move {
-            let _ = serve(tld, port).await;
+            let _ = serve_udp(socket, Arc::new(Resolver::new(bindings))).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

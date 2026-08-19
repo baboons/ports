@@ -80,46 +80,76 @@ pub async fn check_resolution(tld: &str) -> Health {
     }
 }
 
-/// Is our DNS responder running, when this TLD needs one?
-pub async fn check_dns_responder(tld: &str) -> Health {
-    if mechanism_for(tld) == Mechanism::None {
-        return Health::Skip(format!("*.{tld} needs no DNS server"));
-    }
+/// Ask our own resolver a question and read the reply code.
+async fn ask_resolver(port: u16, name: &str) -> Option<(usize, u16)> {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.ok()?;
+    socket.connect(("127.0.0.1", port)).await.ok()?;
 
-    let socket = match tokio::net::UdpSocket::bind("127.0.0.1:0").await {
-        Ok(socket) => socket,
-        Err(err) => return Health::Fail(format!("could not open a socket: {err}")),
-    };
-    if socket
-        .connect(("127.0.0.1", crate::dns::DNS_PORT))
-        .await
-        .is_err()
-    {
-        return Health::Fail("DNS responder is not running — `ports service install`".into());
-    }
-
-    // A real query: a bound socket proves nothing for UDP.
     let mut query = vec![0x42, 0x42, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-    for label in format!("probe.{tld}").split('.') {
+    for label in name.split('.') {
         query.push(label.len() as u8);
         query.extend_from_slice(label.as_bytes());
     }
-    query.extend_from_slice(&[0, 0, 1, 0, 1]);
+    query.push(0);
+    query.extend_from_slice(&[0, 1, 0, 1]);
 
-    if socket.send(&query).await.is_err() {
-        return Health::Fail("DNS responder is not answering".into());
+    socket.send(&query).await.ok()?;
+
+    let mut buffer = [0u8; 1024];
+    // Generous: a forwarded query is a round trip to the internet.
+    let size = tokio::time::timeout(Duration::from_secs(4), socket.recv(&mut buffer))
+        .await
+        .ok()?
+        .ok()?;
+    if size < 12 {
+        return None;
     }
 
-    let mut buffer = [0u8; 512];
-    match tokio::time::timeout(Duration::from_millis(700), socket.recv(&mut buffer)).await {
-        Ok(Ok(size)) if size > 12 => Health::Ok(format!(
-            "DNS responder answering on 127.0.0.1:{}",
-            crate::dns::DNS_PORT
+    let answers = u16::from_be_bytes([buffer[6], buffer[7]]);
+    let rcode = u16::from_be_bytes([buffer[2], buffer[3]]) & 0x000F;
+    Some((answers as usize, rcode))
+}
+
+/// Is our resolver running, and does it both answer and forward?
+pub async fn check_dns_responder(bindings: &Bindings) -> Health {
+    let needing = bindings.domains_needing_dns();
+    if needing.is_empty() {
+        return Health::Skip("every domain resolves without a DNS server".into());
+    }
+
+    let port = bindings.dns.port;
+    let local = format!("probe.{}", needing[0]);
+
+    let Some((answers, _)) = ask_resolver(port, &local).await else {
+        return Health::Fail(format!(
+            "nothing answering DNS on 127.0.0.1:{port} — `ports service install`"
+        ));
+    };
+    if answers == 0 {
+        return Health::Fail(format!(
+            "the resolver on {port} did not answer for *.{}",
+            needing[0]
+        ));
+    }
+
+    // Forwarding is half of what this resolver is for, and it fails
+    // separately — a wrong upstream answers our domains perfectly and
+    // nothing else.
+    match ask_resolver(port, "example.com").await {
+        Some((answers, 0)) if answers > 0 => Health::Ok(format!(
+            "resolver on {}:{port}, forwarding to {}",
+            bindings.host,
+            bindings.dns.forward.join(", ")
         )),
-        _ => Health::Fail(format!(
-            "nothing answering DNS on 127.0.0.1:{} — `ports service install`",
-            crate::dns::DNS_PORT
+        Some((_, rcode)) => Health::Warn(format!(
+            "answering for your domains, but forwarding failed (rcode {rcode}) — \
+             check `ports dns` upstreams"
         )),
+        None => Health::Warn(
+            "answering for your domains, but a forwarded query timed out — \
+             check `ports dns` upstreams"
+                .into(),
+        ),
     }
 }
 
@@ -245,7 +275,7 @@ pub async fn doctor() -> anyhow::Result<()> {
 
     let checks = vec![
         ("resolution", check_resolution(bindings.primary()).await),
-        ("dns", check_dns_responder(bindings.primary()).await),
+        ("dns", check_dns_responder(&bindings).await),
         ("proxy", check_proxy(&bindings).await),
         ("upstreams", check_upstreams(&bindings).await),
         ("certificates", check_ca(&bindings)),
@@ -309,11 +339,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_dns_check_is_skipped_for_localhost() {
+    async fn the_dns_check_is_skipped_when_no_domain_needs_one() {
+        // Only .localhost configured: nothing to resolve, nothing to check.
         assert!(matches!(
-            check_dns_responder("localhost").await,
+            check_dns_responder(&Bindings::default()).await,
             Health::Skip(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_resolver_that_is_not_running_is_a_failure_naming_the_fix() {
+        let bindings = Bindings {
+            domains: vec!["nas.lan".into()],
+            // Nothing will be listening here.
+            dns: crate::config::bindings::DnsConfig {
+                port: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match check_dns_responder(&bindings).await {
+            Health::Fail(message) => assert!(message.contains("service install"), "{message}"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]

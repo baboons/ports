@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::cli::format::{bold, dim, gray, green, yellow};
 use crate::config::bindings::{load_bindings_strict, save_bindings};
-use crate::dns::resolver::{mechanism_for, plan_install, rewrite_hosts, Mechanism};
+use crate::dns::resolver::{mechanism_for, plan_install_on, rewrite_hosts, Mechanism};
 
 /// What `ports domain` was asked to do.
 pub enum DomainAction {
@@ -150,7 +150,8 @@ fn print_setup_all(bindings: &crate::config::bindings::Bindings) -> anyhow::Resu
 
 /// Explain what still has to happen for this TLD to resolve.
 fn print_setup(tld: &str, bindings: &crate::config::bindings::Bindings) -> anyhow::Result<()> {
-    let Some(install) = plan_install(tld) else {
+    let bindings_now = load_bindings_strict().unwrap_or_default();
+    let Some(install) = plan_install_on(tld, bindings_now.dns.port) else {
         println!(
             "{}\n",
             gray("  every resolver sends *.localhost to loopback already — nothing to install")
@@ -246,7 +247,8 @@ pub fn install_resolvers(only: Option<&str>) -> anyhow::Result<()> {
 
 /// Write the resolver entry for one domain. Requires root.
 pub fn install_resolver(tld: &str) -> anyhow::Result<()> {
-    let Some(install) = plan_install(tld) else {
+    let bindings_now = load_bindings_strict().unwrap_or_default();
+    let Some(install) = plan_install_on(tld, bindings_now.dns.port) else {
         println!("\n{}\n", dim("  nothing to install for *.localhost"));
         return Ok(());
     };

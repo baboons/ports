@@ -240,9 +240,39 @@ Any domain other than `.localhost` has to resolve to the machine somehow. If
 your router, LAN DNS or a hosts file already points it here — which is the
 usual case for something like `devbox.lan` — there is nothing to install.
 Otherwise `--install` writes the resolver entry: on macOS `/etc/resolver/<domain>`
-pointing at our DNS responder on `127.0.0.1:15353` (`/etc/resolver` supports a
-`port` keyword, so the responder stays unprivileged); on Linux a
-systemd-resolved drop-in, or a managed block in `/etc/hosts`.
+pointing at our own resolver (`/etc/resolver` supports a `port` keyword, so it
+stays unprivileged); on Linux a systemd-resolved drop-in, or a managed block in
+`/etc/hosts`.
+
+### The resolver
+
+`ports` runs a small DNS server. Names under your domains are answered here;
+**everything else is forwarded**, to Cloudflare unless you say otherwise.
+
+```bash
+ports dns                                   # port, upstreams, what is local
+ports dns --port 53                         # serve other machines
+ports dns --forward 9.9.9.9 --forward 149.112.112.112
+ports dns --reset                           # back to Cloudflare
+```
+
+On the default port of 15353 it only ever sees what `/etc/resolver` sends it,
+so forwarding rarely comes up. Move it to **53** and combine with `ports expose
+all` and it becomes a resolver the rest of the network can point at — your
+router hands out the machine's address as DNS, `*.devbox.lan` resolves to it,
+and everything else goes upstream.
+
+It speaks UDP and TCP. TCP is not optional: when a reply does not fit in a
+datagram the client retries over TCP, so a UDP-only resolver fails on exactly
+the large answers it should handle.
+
+Arbitrary names are resolved **only for clients on loopback or a private
+network**. If your router forwards port 53 from the internet, that guard is
+what stops this becoming an open resolver and, shortly after, a reflection
+amplifier someone else is pointing at a victim. Your own domains are still
+answered for anyone, since that reveals nothing an HTTP request would not.
+
+There is no cache yet, so a forwarded query is a round trip every time.
 
 ### Serving the network
 

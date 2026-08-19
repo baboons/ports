@@ -1,4 +1,5 @@
 pub mod bind;
+pub mod dns;
 pub mod doctor;
 pub mod domain;
 pub mod expose;

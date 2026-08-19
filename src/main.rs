@@ -168,6 +168,26 @@ enum Command {
         address: Option<String>,
     },
 
+    /// Show or change the DNS resolver's port and forwarders
+    ///
+    /// Names under your domains are answered here; everything else is
+    /// forwarded, to Cloudflare unless you say otherwise.
+    #[command(after_help = "EXAMPLES:\n  ports dns\n  ports dns --port 53\n  \
+                            ports dns --forward 9.9.9.9 --forward 149.112.112.112")]
+    Dns {
+        /// Port to listen on — 53 to serve other machines
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Upstream resolver, repeatable or comma-separated
+        #[arg(long, value_name = "ADDRESS")]
+        forward: Vec<String>,
+
+        /// Restore the default forwarders
+        #[arg(long, conflicts_with = "forward")]
+        reset: bool,
+    },
+
     /// Check every layer and report which one is broken
     Doctor,
 
@@ -285,6 +305,11 @@ async fn main() {
             }
         }
         Some(Command::Expose { address }) => ports::cli::expose::expose(address),
+        Some(Command::Dns {
+            port,
+            forward,
+            reset,
+        }) => ports::cli::dns::dns(port, forward, reset),
         Some(Command::Doctor) => ports::cli::doctor::doctor().await,
         Some(Command::Update { check }) => update(check),
         Some(Command::Ca { action }) => ca(action),
@@ -632,6 +657,20 @@ fn ca(action: CaActionArg) -> anyhow::Result<()> {
     }
 }
 
+/// Explain a DNS bind failure in terms of what to do about it.
+fn dns_bind_error(err: std::io::Error, host: &str, port: u16) -> anyhow::Error {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
+            "dns port {port} needs root — `sudo ports serve`, or `ports dns --port 15353`"
+        ),
+        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+            "dns port {port} on {host} is already in use — systemd-resolved and \
+             dnsmasq both take 53; stop one, or `ports dns --port 15353`"
+        ),
+        _ => anyhow::anyhow!("could not bind dns on {host}:{port}: {err}"),
+    }
+}
+
 /// Run the proxy in the foreground.
 async fn serve(
     http_port_override: Option<u16>,
@@ -711,8 +750,19 @@ async fn serve(
         _ => None,
     };
 
-    let dns_socket = if needs_dns {
-        Some(tokio::net::UdpSocket::bind(("127.0.0.1", ports::dns::DNS_PORT)).await?)
+    // The resolver listens wherever the proxy does, so pointing a LAN client
+    // at this machine reaches both. Bound now, while privileges still allow
+    // port 53.
+    let dns_port = bindings.dns.port;
+    let forwarders = bindings.dns.forwarders();
+    let dns = if needs_dns {
+        let udp = tokio::net::UdpSocket::bind((host.as_str(), dns_port))
+            .await
+            .map_err(|err| dns_bind_error(err, &host, dns_port))?;
+        let tcp = tokio::net::TcpListener::bind((host.as_str(), dns_port))
+            .await
+            .map_err(|err| dns_bind_error(err, &host, dns_port))?;
+        Some((udp, tcp))
     } else {
         None
     };
@@ -726,10 +776,16 @@ async fn serve(
     // Populates the index with what is running, and caches their icons.
     tokio::spawn(ports::proxy::watch_ports(Arc::clone(&state)));
 
-    if let Some(socket) = dns_socket {
-        let tld_handle = Arc::new(tokio::sync::RwLock::new(tld.clone()));
+    if let Some((udp, tcp)) = dns {
+        // Shares the proxy's binding table, so a domain added from the index
+        // resolves without a restart.
+        let resolver = Arc::new(ports::dns::Resolver::new(Arc::clone(&state.bindings)));
+        let for_tcp = Arc::clone(&resolver);
         tokio::spawn(async move {
-            let _ = ports::dns::serve_on(socket, tld_handle).await;
+            let _ = ports::dns::serve_udp(udp, resolver).await;
+        });
+        tokio::spawn(async move {
+            let _ = ports::dns::serve_tcp(tcp, for_tcp).await;
         });
     }
 
@@ -758,13 +814,26 @@ async fn serve(
         _ => {}
     }
     if needs_dns {
+        let upstreams = forwarders
+            .iter()
+            .map(|address| address.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         println!(
             "{}",
             dim(&format!(
-                "  dns responder on 127.0.0.1:{}",
-                ports::dns::DNS_PORT
+                "  dns on {host}:{dns_port}, forwarding the rest to {upstreams}"
             ))
         );
+        if exposed && dns_port == 53 {
+            println!(
+                "{}",
+                gray(
+                    "  other machines can use this as their DNS server — arbitrary \
+                     names are resolved only for private clients"
+                )
+            );
+        }
     }
     let index_suffix = if http_port == 80 {
         String::new()

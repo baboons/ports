@@ -117,6 +117,16 @@ pub struct Install {
     pub reload: Option<Vec<String>>,
 }
 
+pub fn plan_install_on(tld: &str, port: u16) -> Option<Install> {
+    let mut plan = plan_install(tld)?;
+    if plan.mechanism == Mechanism::MacResolver {
+        plan.contents = mac_resolver_file(port);
+    } else if plan.mechanism == Mechanism::SystemdResolved {
+        plan.contents = systemd_dropin_file(tld, port);
+    }
+    Some(plan)
+}
+
 pub fn plan_install(tld: &str) -> Option<Install> {
     match mechanism_for(tld) {
         Mechanism::None => None,
