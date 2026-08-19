@@ -60,6 +60,12 @@ pub struct DnsConfig {
     /// Where anything we have no answer for is sent.
     #[serde(default = "default_forwarders")]
     pub forward: Vec<String>,
+
+    /// Address to hand out for the bound domains, overriding what the routing
+    /// table suggests. Worth setting on a machine with several interfaces,
+    /// where the automatic answer may pick a docker bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<String>,
 }
 
 impl Default for DnsConfig {
@@ -67,6 +73,7 @@ impl Default for DnsConfig {
         Self {
             port: default_dns_port(),
             forward: default_forwarders(),
+            advertise: None,
         }
     }
 }
@@ -128,6 +135,13 @@ pub struct Bindings {
 
     #[serde(default)]
     pub dns: DnsConfig,
+
+    /// Addresses allowed to change bindings through the web interface.
+    ///
+    /// Loopback always may, and is not listed. Anything here is trusted
+    /// without a password, so it is trusting whoever holds the address.
+    #[serde(default)]
+    pub trusted: Vec<String>,
 }
 
 fn default_version() -> u32 {
@@ -162,6 +176,7 @@ impl Default for Bindings {
             https_port: default_https_port_opt(),
             bindings: Vec::new(),
             dns: DnsConfig::default(),
+            trusted: Vec::new(),
         }
     }
 }

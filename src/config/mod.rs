@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod curation;
+pub mod trust;
 
 use std::path::{Path, PathBuf};
 

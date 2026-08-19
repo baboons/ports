@@ -164,11 +164,60 @@ pub fn build_response(query: &Query, answer: &Answer) -> Vec<u8> {
     out
 }
 
+/// Which of our addresses can this client actually reach us on?
+///
+/// Answering 127.0.0.1 to a machine across the network sends it to itself.
+/// The kernel already knows which of our addresses it would use to talk to a
+/// given peer, so ask it: connecting a UDP socket sends nothing, it just fixes
+/// a route and a source address.
+pub fn address_for_client(client: IpAddr, bindings: &Bindings, want_v6: bool) -> Option<IpAddr> {
+    // Explicitly configured wins — auto-detection cannot know which of a
+    // docker bridge and a LAN interface you meant. Only for the family asked
+    // about, so a v4 override does not become a bogus AAAA.
+    if let Some(advertise) = bindings
+        .dns
+        .advertise
+        .as_deref()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+    {
+        return (advertise.is_ipv6() == want_v6).then_some(advertise);
+    }
+
+    // On the machine itself both families reach us, whichever it asked from.
+    if client.is_loopback() {
+        return Some(if want_v6 {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        });
+    }
+
+    // We can only route to a peer over the family it reached us on, so a v4
+    // client has no v6 answer to be given.
+    if client.is_ipv6() != want_v6 {
+        return None;
+    }
+
+    let bind = if want_v6 { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    // Port 53 is arbitrary; connecting a UDP socket sends nothing, it only
+    // asks the kernel which source address it would use.
+    socket.connect((client, 53)).ok()?;
+    let local = socket.local_addr().ok()?.ip();
+
+    // A route resolving to a loopback or unspecified source tells the client
+    // nothing it can use.
+    if local.is_loopback() || local.is_unspecified() {
+        return None;
+    }
+    Some(local)
+}
+
 /// Decide what to answer for a name, or None when it is not ours to answer.
 ///
 /// None is the signal to forward: a name outside our domains is a question for
 /// somebody else, not a name that does not exist.
-pub fn answer_for_domains(query: &Query, bindings: &Bindings) -> Option<Answer> {
+pub fn answer_for_domains(query: &Query, bindings: &Bindings, client: IpAddr) -> Option<Answer> {
     if query.qclass != CLASS_IN {
         return None;
     }
@@ -182,8 +231,16 @@ pub fn answer_for_domains(query: &Query, bindings: &Bindings) -> Option<Answer> 
     }
 
     Some(match query.qtype {
-        TYPE_A => Answer::Address(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        TYPE_AAAA => Answer::Address(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        // No address this client could use means no answer. Handing back
+        // 127.0.0.1 would point it at itself, which is worse than silence.
+        TYPE_A => match address_for_client(client, bindings, false) {
+            Some(address) => Answer::Address(address),
+            None => Answer::NoData,
+        },
+        TYPE_AAAA => match address_for_client(client, bindings, true) {
+            Some(address) => Answer::Address(address),
+            None => Answer::NoData,
+        },
         // The name exists, it just has no MX or HTTPS record. Saying NXDOMAIN
         // here would make some resolvers treat the whole name as missing.
         _ => Answer::NoData,
@@ -197,7 +254,8 @@ pub fn answer_for(query: &Query, tld: &str) -> Answer {
         domains: vec![tld.to_string()],
         ..Default::default()
     };
-    answer_for_domains(query, &bindings).unwrap_or(Answer::NameError)
+    answer_for_domains(query, &bindings, IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap_or(Answer::NameError)
 }
 
 /// Everything the resolver needs to answer a query.
@@ -220,7 +278,7 @@ impl Resolver {
 
         let (answer, forwarders) = {
             let bindings = self.bindings.read().await;
-            let answer = answer_for_domains(&query, &bindings);
+            let answer = answer_for_domains(&query, &bindings, client);
             (answer, bindings.dns.forwarders())
         };
 
@@ -514,6 +572,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_remote_client_is_told_an_address_it_can_actually_reach() {
+        // The bug this exists for: answering 127.0.0.1 to a machine across
+        // the network sends it to itself.
+        let bindings = Bindings {
+            domains: vec!["nas.lan".into()],
+            ..Default::default()
+        };
+
+        // Route lookup for a public address, which any machine with a default
+        // route can do without sending anything.
+        let answer = address_for_client("1.1.1.1".parse().unwrap(), &bindings, false);
+        if let Some(address) = answer {
+            assert!(
+                !address.is_loopback(),
+                "told a remote client to use {address}"
+            );
+        }
+
+        // Loopback still gets loopback.
+        assert_eq!(
+            address_for_client("127.0.0.1".parse().unwrap(), &bindings, false),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        // And a loopback client still gets both families.
+        assert_eq!(
+            address_for_client("127.0.0.1".parse().unwrap(), &bindings, true),
+            Some("::1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn an_explicit_advertise_address_overrides_the_routing_table() {
+        // A box with a docker bridge can route to the wrong interface.
+        let bindings = Bindings {
+            domains: vec!["nas.lan".into()],
+            dns: crate::config::bindings::DnsConfig {
+                advertise: Some("10.0.1.2".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        for client in ["127.0.0.1", "10.0.1.50", "1.1.1.1"] {
+            assert_eq!(
+                address_for_client(client.parse().unwrap(), &bindings, false),
+                Some("10.0.1.2".parse().unwrap()),
+                "{client}"
+            );
+            // A v4 override is not an AAAA answer.
+            assert_eq!(
+                address_for_client(client.parse().unwrap(), &bindings, true),
+                None,
+                "{client}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_advertised_address_is_what_the_answer_carries() {
+        let bindings = Arc::new(RwLock::new(Bindings {
+            domains: vec!["nas.lan".into()],
+            dns: crate::config::bindings::DnsConfig {
+                advertise: Some("10.0.1.2".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("tvarr.nas.lan", TYPE_A),
+                "10.0.1.50".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(&reply[reply.len() - 4..], &[10, 0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_v4_client_asking_for_aaaa_gets_nodata_not_a_useless_answer() {
+        let bindings = Arc::new(RwLock::new(Bindings {
+            domains: vec!["nas.lan".into()],
+            dns: crate::config::bindings::DnsConfig {
+                advertise: Some("10.0.1.2".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+
+        let resolver = Resolver::new(bindings);
+        let reply = resolver
+            .respond(
+                &query_bytes("tvarr.nas.lan", TYPE_AAAA),
+                "10.0.1.50".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // ::1 would send it to itself; NOERROR with no answer is the truth.
+        assert_eq!(
+            u16::from_be_bytes([reply[6], reply[7]]),
+            0,
+            "expected no answer"
+        );
+        assert_eq!(u16::from_be_bytes([reply[2], reply[3]]) & 0x000F, 0);
+    }
+
+    #[tokio::test]
     async fn a_name_we_own_is_answered_here_not_forwarded() {
         let bindings = table(&["nas.lan"]);
         // An upstream that would answer differently, to prove it was not asked.
@@ -627,7 +795,8 @@ mod tests {
         assert_eq!(rcode, 5, "expected REFUSED");
 
         // Our own domains are still answered, since that reveals nothing an
-        // HTTP request to the same box would not.
+        // HTTP request to the same box would not. Whatever address comes back
+        // must not be loopback, which would point the client at itself.
         let ours = resolver
             .respond(
                 &query_bytes("myapp.nas.lan", TYPE_A),
@@ -635,7 +804,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(&ours[ours.len() - 4..], &[127, 0, 0, 1]);
+        let rcode = u16::from_be_bytes([ours[2], ours[3]]) & 0x000F;
+        assert_eq!(rcode, 0, "our own domain should not be refused");
+        if u16::from_be_bytes([ours[6], ours[7]]) > 0 {
+            assert_ne!(&ours[ours.len() - 4..], &[127, 0, 0, 1]);
+        }
     }
 
     #[tokio::test]

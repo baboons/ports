@@ -5,3 +5,4 @@ pub mod domain;
 pub mod expose;
 pub mod format;
 pub mod service;
+pub mod trust;

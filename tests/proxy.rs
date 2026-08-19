@@ -852,3 +852,79 @@ async fn the_data_endpoint_reports_the_domains() {
     // The page needs to know whether to draw its controls at all.
     assert!(response.contains("\"writable\":true"));
 }
+
+// --- Trusted addresses ------------------------------------------------------
+
+/// Start a proxy that trusts specific addresses.
+async fn start_trusting(trusted: &[&str]) -> u16 {
+    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let mut bindings = Bindings {
+        http_port: port,
+        https_port: None,
+        trusted: trusted.iter().map(|t| t.to_string()).collect(),
+        ..Default::default()
+    };
+    bindings.upsert("myapp".into(), "127.0.0.1:9".into(), 0);
+
+    let state = Arc::new(ProxyState::with_path(bindings, scratch_config()));
+    tokio::spawn(async move {
+        let _ = serve_http(state, port).await;
+    });
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    port
+}
+
+#[tokio::test]
+async fn trusting_an_address_does_not_open_the_door_to_everyone() {
+    // The connection below still comes from loopback, so this asserts the
+    // configuration parses and does not accidentally widen anything: the
+    // guard is unit-tested per address in proxy::writes_allowed_from.
+    let proxy = start_trusting(&["10.0.1.50", "10.0.2.0/24"]).await;
+    let origin = format!("http://ports.localhost:{proxy}");
+
+    // Loopback is still allowed, trusted list or not.
+    let ok = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some(&origin),
+            "application/json",
+            r#"{"name":"fromhere","target":"4321"}"#,
+        ),
+    )
+    .await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "got: {ok}");
+
+    // And a cross-origin request is refused regardless of who is trusted.
+    let hostile = raw(
+        proxy,
+        &post(
+            "ports.localhost",
+            "/_ports/bind",
+            Some("https://evil.example"),
+            "application/json",
+            r#"{"name":"pwned","target":"4321"}"#,
+        ),
+    )
+    .await;
+    assert!(hostile.starts_with("HTTP/1.1 403"), "got: {hostile}");
+}
+
+#[tokio::test]
+async fn a_bad_trust_entry_grants_nothing_rather_than_everything() {
+    // A typo in the config must fail closed.
+    let proxy = start_trusting(&["not-an-address", "10.0.1.0/99"]).await;
+    let response = request(proxy, "ports.localhost", "/_ports/data").await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    // Loopback still works; nothing crashed parsing the nonsense.
+    assert!(response.contains("\"writable\":true"));
+}

@@ -188,6 +188,28 @@ enum Command {
         reset: bool,
     },
 
+    /// Show or change which addresses may bind from the web interface
+    ///
+    /// This machine always may. Anything else has to be named, and is then
+    /// trusted without a password.
+    #[command(
+        after_help = "EXAMPLES:\n  ports trust\n  ports trust --add 10.0.1.50\n  \
+                            ports trust --add 10.0.1.0/24\n  ports trust --clear"
+    )]
+    Trust {
+        /// Address or network to allow, repeatable or comma-separated
+        #[arg(long, value_name = "ADDRESS")]
+        add: Vec<String>,
+
+        /// Stop allowing one
+        #[arg(long, value_name = "ADDRESS")]
+        remove: Vec<String>,
+
+        /// Allow nothing but this machine again
+        #[arg(long)]
+        clear: bool,
+    },
+
     /// Check every layer and report which one is broken
     Doctor,
 
@@ -310,6 +332,7 @@ async fn main() {
             forward,
             reset,
         }) => ports::cli::dns::dns(port, forward, reset),
+        Some(Command::Trust { add, remove, clear }) => ports::cli::trust::trust(add, remove, clear),
         Some(Command::Doctor) => ports::cli::doctor::doctor().await,
         Some(Command::Update { check }) => update(check),
         Some(Command::Ca { action }) => ca(action),

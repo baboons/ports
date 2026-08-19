@@ -266,6 +266,17 @@ It speaks UDP and TCP. TCP is not optional: when a reply does not fit in a
 datagram the client retries over TCP, so a UDP-only resolver fails on exactly
 the large answers it should handle.
 
+Your domains resolve to **the address the asking machine can reach this one
+on**, not to 127.0.0.1 — answering loopback to a client across the network
+would send it back to itself. The address comes from the routing table. On a
+machine with several interfaces, where that may pick a docker bridge rather
+than your LAN, name it:
+
+```jsonc
+// ~/.config/ports/bindings.json
+{ "dns": { "advertise": "10.0.1.2" } }
+```
+
 Arbitrary names are resolved **only for clients on loopback or a private
 network**. If your router forwards port 53 from the internet, that guard is
 what stops this becoming an open resolver and, shortly after, a reflection
@@ -305,6 +316,31 @@ And `bind`/`unbind` from the page are **refused from anywhere but the machine
 itself** — the Origin check that protects a browser is worth nothing against a
 peer that can set headers freely, so the listing stays readable from your laptop
 while changing it stays a `ports bind` on the box.
+
+### Trusting other machines
+
+If you would rather bind from your laptop, name it:
+
+```bash
+ports trust                             # who may, right now
+ports trust --add 10.0.1.50             # one machine
+ports trust --add 10.0.1.0/24           # a network
+ports trust --remove 10.0.1.50
+ports trust --clear                     # back to this machine only
+```
+
+Single addresses and CIDR ranges, IPv4 and IPv6. This machine is always
+allowed and is not listed.
+
+Be clear about what this is: **there is no password**. Anything holding one of
+those addresses can repoint your domains, so it is worth exactly as much as
+your confidence that nothing else will end up on that address. A rule covering
+every address (`0.0.0.0/0`) is refused rather than honoured. An entry that does
+not parse grants nothing — it fails closed.
+
+The page hides its own controls when the server would refuse them, so a
+non-trusted machine sees a listing with no buttons rather than buttons that
+return 403.
 
 `.dev`, `.app`, `.zip` and `.mov` are refused: they are real TLDs on the HSTS
 preload list, so browsers force HTTPS before the request reaches anything and

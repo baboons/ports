@@ -490,7 +490,12 @@ async fn index_page(
 ) -> Response<ProxyBody> {
     let bindings = state.bindings.read().await;
     let records = state.records.read().await;
-    let snapshot = index::snapshot(&bindings, &records, writes_allowed_from(client_ip), host);
+    let snapshot = index::snapshot(
+        &bindings,
+        &records,
+        writes_allowed_from(client_ip, &bindings),
+        host,
+    );
 
     // Arriving at a name nothing is bound to is not an error worth a 404 in
     // the console, but it is worth saying which name you asked for.
@@ -543,13 +548,12 @@ fn origin_is_self(
 
 /// May a request from this address change the bindings?
 ///
-/// Only from the machine itself. Off-loopback the Origin check buys nothing —
-/// it defends against another *website* in a browser, and anything on the
-/// network can set a header to whatever it likes with one curl flag. So when
-/// the proxy is reachable from elsewhere the listing stays readable, but
-/// changing it is something you do on the box, with `ports bind`.
-pub fn writes_allowed_from(client_ip: IpAddr) -> bool {
-    client_ip.is_loopback()
+/// The machine itself always may. Beyond that the Origin check buys nothing —
+/// it defends against another *website* in a browser, and any peer can set a
+/// header with one curl flag — so a remote address has to be named in the
+/// trusted list, which is a deliberate act rather than a default.
+pub fn writes_allowed_from(client_ip: IpAddr, bindings: &Bindings) -> bool {
+    crate::config::trust::is_trusted(client_ip, &bindings.trusted)
 }
 
 fn json(status: StatusCode, body: &serde_json::Value) -> Response<ProxyBody> {
@@ -600,7 +604,7 @@ async fn serve_index_route(
         let snapshot = index::snapshot(
             &bindings,
             &records,
-            writes_allowed_from(client_ip),
+            writes_allowed_from(client_ip, &bindings),
             &host_header,
         );
         return json(
@@ -638,14 +642,17 @@ async fn serve_index_route(
         .unwrap_or_default()
         .to_string();
 
-    if !writes_allowed_from(client_ip) {
-        return json(
-            StatusCode::FORBIDDEN,
-            &serde_json::json!({
-                "error": "read-only from off this machine — bind from the machine itself, \
-                          with `ports bind`"
-            }),
-        );
+    {
+        let bindings = state.bindings.read().await;
+        if !writes_allowed_from(client_ip, &bindings) {
+            return json(
+                StatusCode::FORBIDDEN,
+                &serde_json::json!({
+                    "error": "not allowed from this address — bind on the machine itself, \
+                              or add it with `ports trust <address>`"
+                }),
+            );
+        }
     }
 
     if !origin_is_self(&req, &host_header, scheme, listen_port) {
@@ -771,14 +778,31 @@ mod tests {
     fn only_the_machine_itself_may_change_bindings() {
         // Loopback is the machine; anything else came over a network, where a
         // forged Origin header costs one curl flag.
-        assert!(writes_allowed_from("127.0.0.1".parse().unwrap()));
-        assert!(writes_allowed_from("::1".parse().unwrap()));
+        let bare = Bindings::default();
+        assert!(writes_allowed_from("127.0.0.1".parse().unwrap(), &bare));
+        assert!(writes_allowed_from("::1".parse().unwrap(), &bare));
 
         // A LAN peer, the machine's own LAN address, and the wider internet.
-        assert!(!writes_allowed_from("192.168.1.42".parse().unwrap()));
-        assert!(!writes_allowed_from("10.0.0.5".parse().unwrap()));
-        assert!(!writes_allowed_from("8.8.8.8".parse().unwrap()));
-        assert!(!writes_allowed_from("fd00::1".parse().unwrap()));
+        assert!(!writes_allowed_from("192.168.1.42".parse().unwrap(), &bare));
+        assert!(!writes_allowed_from("10.0.0.5".parse().unwrap(), &bare));
+        assert!(!writes_allowed_from("8.8.8.8".parse().unwrap(), &bare));
+        assert!(!writes_allowed_from("fd00::1".parse().unwrap(), &bare));
+
+        // Named explicitly, and only then.
+        let trusting = Bindings {
+            trusted: vec!["192.168.1.42".into(), "10.0.2.0/24".into()],
+            ..Default::default()
+        };
+        assert!(writes_allowed_from(
+            "192.168.1.42".parse().unwrap(),
+            &trusting
+        ));
+        assert!(writes_allowed_from("10.0.2.9".parse().unwrap(), &trusting));
+        assert!(!writes_allowed_from(
+            "192.168.1.43".parse().unwrap(),
+            &trusting
+        ));
+        assert!(!writes_allowed_from("8.8.8.8".parse().unwrap(), &trusting));
     }
 
     #[tokio::test]
