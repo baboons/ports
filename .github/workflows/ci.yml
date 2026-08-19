@@ -16,6 +16,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # Pinned rather than `stable`: a floating toolchain means a Rust release
