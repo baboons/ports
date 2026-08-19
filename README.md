@@ -120,6 +120,25 @@ from ~1.6s to ~0.03s. Ports discovered by a sweep that is currently being
 skipped are still shown, marked stale rather than dropped — caching makes the
 answer cheaper, never smaller.
 
+### Freeing a port
+
+```bash
+ports kill 8080           # stop whatever is listening
+ports kill 3000 5173      # several at once
+ports kill 8080 --force   # SIGKILL, no chance to shut down cleanly
+-y, --yes                 # do not ask
+```
+
+It shows what will die before killing it — command, project and user, not
+just a pid — then sends SIGTERM and waits up to three seconds so a dev server
+can exit tidily, escalating to SIGKILL only if that is ignored. Afterwards it
+checks the port actually came free, which catches a supervised worker whose
+parent immediately respawns it.
+
+It will not kill init, itself, or the `ports` proxy — for that last one,
+`ports service uninstall`. Another user's process needs `sudo`, and says so
+rather than failing obscurely.
+
 ### Curating what you see
 
 Most of a machine's listening ports are app IPC endpoints you will never open:

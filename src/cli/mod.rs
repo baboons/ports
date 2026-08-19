@@ -4,5 +4,6 @@ pub mod doctor;
 pub mod domain;
 pub mod expose;
 pub mod format;
+pub mod kill;
 pub mod service;
 pub mod trust;

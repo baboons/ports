@@ -78,6 +78,28 @@ enum Command {
     /// Show the current hide rules and where they live
     Hidden,
 
+    /// Stop whatever is listening on a port
+    ///
+    /// Sends SIGTERM and waits, so a dev server can exit tidily, then SIGKILL
+    /// if it ignores that.
+    #[command(
+        after_help = "EXAMPLES:\n  ports kill 8080\n  ports kill 3000 5173\n  \
+                            ports kill 8080 --force"
+    )]
+    Kill {
+        /// Ports to free
+        #[arg(required = true)]
+        ports: Vec<u16>,
+
+        /// Do not ask first
+        #[arg(short, long)]
+        yes: bool,
+
+        /// SIGKILL straight away, with no chance to shut down cleanly
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Bind a local domain to a port
     ///
     /// With one argument the name is inferred from the project running there.
@@ -280,6 +302,9 @@ async fn main() {
         Some(Command::Hide { ports }) => curate(&ports, true),
         Some(Command::Unhide { ports }) => curate(&ports, false),
         Some(Command::Hidden) => show_hidden(),
+        Some(Command::Kill { ports, yes, force }) => {
+            ports::cli::kill::kill(ports, yes, force).await
+        }
         Some(Command::Bind { first, second }) => {
             // `ports bind 4000` infers the name; `ports bind myapp 4000` does not.
             match second {
