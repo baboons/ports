@@ -12,6 +12,14 @@ use crate::types::{PortRecord, Protocol};
 /// The subdomain the index always answers on.
 pub const INDEX_NAME: &str = "ports";
 
+/// The mark, as a data URI.
+///
+/// Inline like everything else the page uses: a favicon fetched from a file
+/// would be one more route to serve and one more thing to break offline.
+/// Single-quoted inside so it needs no escaping here, and only the characters
+/// a URI genuinely cannot carry are encoded.
+pub const FAVICON: &str = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%20role='img'%20aria-label='ports'%3E%20%3Crect%20width='16'%20height='16'%20rx='3'%20fill='%230a0e0d'/%3E%20%3Ccircle%20cx='8'%20cy='8'%20r='3'%20fill='%23f0a640'/%3E%20%3C/svg%3E";
+
 /// Is this hostname the index, under any configured domain?
 ///
 /// `ports.<domain>` for every domain, so the page is reachable by the same
@@ -365,13 +373,15 @@ pub fn render(snapshot: &Snapshot, missing: Option<&str>) -> String {
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>ports</title>
+<link rel=icon href="{FAVICON}">
 <style>{CSS}</style>
-<h1>ports <span class=tld>*.{tld}</span></h1>
+<h1><img class=mark src="{FAVICON}" alt="" width=22 height=22>ports <span class=tld>*.{tld}</span></h1>
 {banner}
 <div id=app></div>
 <script>const DATA={data};{JS}</script>
 "#,
         tld = escape(&snapshot.tld),
+        FAVICON = FAVICON,
     )
 }
 
@@ -392,7 +402,9 @@ const CSS: &str = r#"
 body{margin:0;padding:2.5rem 1.5rem 4rem;background:var(--bg);color:var(--fg);
 font:14px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 max-width:56rem;margin-inline:auto}
-h1{font-size:1.1rem;font-weight:600;margin:0 0 1.5rem;letter-spacing:-.01em}
+h1{font-size:1.1rem;font-weight:600;margin:0 0 1.5rem;letter-spacing:-.01em;
+display:flex;align-items:center;gap:.55rem}
+.mark{border-radius:5px;flex:0 0 auto}
 .tld{color:var(--dim);font-weight:400;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 h2{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
 color:var(--dim);margin:2rem 0 .5rem}
@@ -963,6 +975,25 @@ mod tests {
         assert!(
             html.contains(env!("CARGO_PKG_VERSION")),
             "the footer should name the version"
+        );
+    }
+
+    #[test]
+    fn the_page_carries_the_mark() {
+        let html = render(
+            &snapshot(&Bindings::default(), &[], true, "ports.localhost"),
+            None,
+        );
+
+        assert!(html.contains("rel=icon"), "the page should set a favicon");
+        // The two brand colours, so a redesign that loses them is deliberate.
+        assert!(FAVICON.contains("%230a0e0d"), "ground colour missing");
+        assert!(FAVICON.contains("%23f0a640"), "accent colour missing");
+        // Inline, not a route to fetch.
+        assert!(FAVICON.starts_with("data:image/svg+xml,"));
+        assert!(
+            html.contains("class=mark"),
+            "the heading should show the mark"
         );
     }
 

@@ -398,9 +398,16 @@ async fn the_index_page_fetches_nothing_from_the_internet() {
         let rest = &body[index + 3..];
         let host: String = rest
             .chars()
-            .take_while(|c| !matches!(c, '/' | '"' | '\'' | ' ' | '<' | ')'))
+            .take_while(|c| !matches!(c, '/' | '"' | '\'' | ' ' | '<' | ')' | '%'))
             .collect();
         let bare = host.split(':').next().unwrap_or(&host);
+
+        // The SVG namespace is an identifier, not a resource — it is required
+        // for an inline SVG to render and is never fetched.
+        if bare == "www.w3.org" {
+            continue;
+        }
+
         assert!(
             bare == "localhost" || bare.ends_with(".localhost") || bare == "127.0.0.1",
             "index references {bare:?}, which is not on this machine"

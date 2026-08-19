@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128"
+     role="img" aria-label="ports">
+  <title>ports</title>
+  <rect width="128" height="128" rx="26" fill="#0a0e0d"/>
+  <!-- The glow the old interface put on its accent, drawn as rings so it
+       survives anywhere an SVG filter might not. -->
+  <circle cx="64" cy="64" r="42" fill="none" stroke="#f0a640" stroke-opacity=".10" stroke-width="12"/>
+  <circle cx="64" cy="64" r="33" fill="none" stroke="#f0a640" stroke-opacity=".22" stroke-width="8"/>
+  <circle cx="64" cy="64" r="24" fill="#f0a640"/>
+</svg>

@@ -1,6 +1,6 @@
 [package]
 name = "baboons-ports"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 rust-version = "1.85"
 description = "Find the HTTP servers running on this machine, and bind them to local domains"
@@ -10,6 +10,8 @@ repository = "https://github.com/baboons/ports"
 homepage = "https://github.com/baboons/ports#readme"
 keywords = ["ports", "localhost", "proxy", "dev-server", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+# The README references assets/, so a packaged crate needs them too.
+include = ["src/**/*", "assets/**/*", "README.md", "Cargo.toml"]
 
 [lib]
 name = "ports"

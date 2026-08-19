@@ -1,6 +1,10 @@
+<img src="assets/logo.svg" alt="" width="72" height="72" align="left">
+
 # ports
 
 Find every HTTP server running on this machine, and give them names.
+
+<br clear="left">
 
 ```
 $ ports
